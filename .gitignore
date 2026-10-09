@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+build/
+dist/
+*.egg-info/
+.eggs/
+.venv/
+venv/
+
+# Testing / linting caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Data and results stay out of git: recordings sit wherever data.dataset points,
+# runs go under outputs/. The folders themselves are kept through .gitkeep.
+data/*
+!data/.gitkeep
+outputs/*
+!outputs/.gitkeep
+examples/output/
+# Tables dropped in the project root for a quick regress/stepwise run.
+/*.csv
+*.wav
+*.mat
+*.mfc
+*.htk
+*.dat
+*.bin
+*.npy
+*.npz
+*.joblib
+*.pt
+*.xlsx
+*.xls
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
