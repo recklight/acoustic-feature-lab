@@ -1,5 +1,6 @@
-"""Documentation checks: Traditional Chinese with Taiwan usage, the README layout,
-and no path or e-mail address from a personal machine.
+"""Documentation checks: Traditional Chinese with Taiwan usage, the layout of the
+English README and its Traditional Chinese version, and no path or e-mail address
+from a personal machine.
 
 The mainland terms are kept as escapes so that a text search of the repository
 does not find them here.
@@ -14,10 +15,31 @@ import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 README = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
+README_ZH = (PROJECT_ROOT / "README.zh-TW.md").read_text(encoding="utf-8")
 THIS_FILE = Path(__file__).resolve()
 
-#: Every level-2 heading of the README, in order.
+#: Every level-2 heading of README.md, in order.
 EXPECTED_H2 = [
+    "Contents",
+    "Overview",
+    "Method",
+    "Installation",
+    "Quick start",
+    "Usage",
+    "CLI reference",
+    "Project layout",
+    "Preparing data",
+    "Configuration",
+    "Results and metrics",
+    "Known limitations",
+    "Design notes",
+    "Development and testing",
+    "References",
+    "License",
+]
+
+#: The level-2 headings of README.zh-TW.md, which follows README.md section by section.
+EXPECTED_H2_ZH = [
     "目錄",
     "專案簡介",
     "方法說明",
@@ -149,21 +171,78 @@ def test_readme_heading_order():
     assert headings == EXPECTED_H2
 
 
-def test_readme_opens_with_badges_and_author_and_closes_with_the_license():
+def test_chinese_readme_heading_order():
+    headings = re.findall(r"^## (.+?)\s*$", README_ZH, re.MULTILINE)
+    assert headings == EXPECTED_H2_ZH
+
+
+@pytest.mark.parametrize(
+    ("text", "author", "license_line"),
+    [
+        pytest.param(
+            README,
+            "Author: RL",
+            "MIT License, Copyright (c) RL. See [LICENSE](LICENSE).",
+            id="README.md",
+        ),
+        pytest.param(
+            README_ZH,
+            "作者：RL",
+            "MIT License，Copyright (c) RL。詳見 [LICENSE](LICENSE)。",
+            id="README.zh-TW.md",
+        ),
+    ],
+)
+def test_readme_opens_with_badges_and_author_and_closes_with_the_license(
+    text, author, license_line
+):
     pyproject = (PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8")
     name = re.search(r'^name = "([^"]+)"$', pyproject, re.MULTILINE).group(1)
-    lines = README.splitlines()
+    lines = text.splitlines()
     assert lines[0] == f"# {name}"
     assert lines[2].startswith("[![CI](") and lines[3].startswith("[![Python](")
     assert lines[4].startswith("[![License: MIT](")
-    assert "\n作者：RL\n" in README
-    assert "MIT License，Copyright (c) RL。詳見 [LICENSE](LICENSE)。" in README
+    assert f"\n{author}\n" in text
+    assert license_line in text
 
 
-def test_readme_is_mostly_chinese_prose():
-    assert len(_CJK.findall(README)) > 2000
+def test_each_readme_links_to_the_other_under_the_badges():
+    assert README.splitlines()[:6] == README_ZH.splitlines()[:6]
+    assert README.splitlines()[6] == "English | [繁體中文](README.zh-TW.md)"
+    assert README_ZH.splitlines()[6] == "[English](README.md) | 繁體中文"
 
 
-def test_readme_runs_pytest_without_pythonpath():
+@pytest.mark.parametrize(
+    ("text", "stem"),
+    [
+        pytest.param(README, "workflow", id="README.md"),
+        pytest.param(README_ZH, "workflow.zh-TW", id="README.zh-TW.md"),
+    ],
+)
+def test_readme_shows_the_workflow_diagram_in_its_own_language(text, stem):
+    online = (
+        f"https://raw.githack.com/recklight/acoustic-feature-lab/master/docs/{stem}.html?theme=dark"
+    )
+    # The figure links to the online page, and so does the sentence under it.
+    assert f"(docs/images/{stem}.png)]({online})" in text
+    assert text.count(f"]({online})") == 2
+    assert f"](docs/{stem}.html)" in text
+
+
+def test_readme_is_mostly_english_prose():
+    # The link to the Chinese version is the only Chinese in README.md.
+    assert not _CJK.findall(README.replace("[繁體中文](README.zh-TW.md)", ""))
+    assert len(re.findall(r"\b[A-Za-z]{3,}\b", README)) > 5000
+
+
+def test_chinese_readme_is_mostly_chinese_prose():
+    assert len(_CJK.findall(README_ZH)) > 2000
+
+
+@pytest.mark.parametrize(
+    "text",
+    [pytest.param(README, id="README.md"), pytest.param(README_ZH, id="README.zh-TW.md")],
+)
+def test_readme_runs_pytest_without_pythonpath(text):
     # pyproject.toml already puts src on pytest's path (pythonpath = ["src"]).
-    assert "PYTHONPATH=src python -m pytest" not in README
+    assert "PYTHONPATH=src python -m pytest" not in text

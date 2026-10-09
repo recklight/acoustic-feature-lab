@@ -4,284 +4,286 @@
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-以梅爾頻率倒頻譜係數（Mel-Frequency Cepstral Coefficients, MFCC）描述嗓音，比較不同的特徵設定，並以迴歸模型預測連續的臨床嚴重度評分。
+English | [繁體中文](README.zh-TW.md)
 
-輸入是持續母音的錄音，以及每段錄音的嚴重度評分（例如 CAPE-V 的 0–100 視覺類比量尺）。倒頻譜前端先算出音框（frame）層級的特徵，再彙整成每段錄音一個向量，接著用依受試者分組的交叉驗證評估迴歸或分類模型。同一套流程可以展開「倒頻譜數 × Δ 階數 × 能量項 × 彙整統計量 × 模型」的 ablation 網格並做顯著性比較；迴歸分析的部分有最小平方推論、殘差診斷、逐步選擇與多項式階數選擇，也能算特徵與評分之間的相關與一致性。結果寫成 CSV、JSON 與圖檔，每個輸出資料夾都留有當次的設定檔與 manifest，之後可以照著重跑。Python 套件名稱是 `acoustic_feature_lab`，命令列工具是 `acoustic-feature-lab`。
+Represents voices by their mel-frequency cepstral coefficients (MFCCs), compares feature settings, and predicts continuous clinical severity ratings with regression models.
 
-作者：RL
+The input is a set of sustained-vowel recordings, each with a severity rating (for example CAPE-V's 0–100 visual analog scale). The cepstral front end computes frame-level features and pools them into one vector per recording, and regression or classification models are then evaluated with cross-validation grouped by speaker. The same pipeline can expand an ablation grid (number of cepstra × Δ order × energy term × pooling statistics × model) and test the differences for significance. For regression analysis it has least-squares inference, residual diagnostics, stepwise selection and polynomial order selection, and it also measures the correlation and agreement between features and ratings. Results are written as CSV, JSON and figures, and every output folder keeps the configuration and a manifest of the run, so it can be repeated later. The Python package is `acoustic_feature_lab`; the command-line tool is `acoustic-feature-lab`.
+
+Author: RL
 
 ---
 
-## 目錄
+## Contents
 
-- [專案簡介](#專案簡介)
-- [方法說明](#方法說明)
-- [安裝步驟](#安裝步驟)
-- [快速開始](#快速開始)
-- [使用範例](#使用範例)
-- [CLI 指令對照表](#cli-指令對照表)
-- [專案結構](#專案結構)
-- [資料準備](#資料準備)
-- [設定檔](#設定檔)
-- [結果與評估指標](#結果與評估指標)
-- [已知限制](#已知限制)
-- [設計重點](#設計重點)
-- [開發與測試](#開發與測試)
+- [Overview](#overview)
+- [Method](#method)
+- [Installation](#installation)
+- [Quick start](#quick-start)
+- [Usage](#usage)
+- [CLI reference](#cli-reference)
+- [Project layout](#project-layout)
+- [Preparing data](#preparing-data)
+- [Configuration](#configuration)
+- [Results and metrics](#results-and-metrics)
+- [Known limitations](#known-limitations)
+- [Design notes](#design-notes)
+- [Development and testing](#development-and-testing)
 - [References](#references)
 - [License](#license)
 
 ---
 
-## 專案簡介
+## Overview
 
-[![acoustic-feature-lab 流程圖](docs/images/workflow.png)](https://raw.githack.com/recklight/acoustic-feature-lab/master/docs/workflow.html?theme=dark)
+[![acoustic-feature-lab workflow](docs/images/workflow.png)](https://raw.githack.com/recklight/acoustic-feature-lab/master/docs/workflow.html?theme=dark)
 
-互動版流程圖可以縮放、搜尋節點，也能標出任兩個步驟之間的路徑：[線上瀏覽](https://raw.githack.com/recklight/acoustic-feature-lab/master/docs/workflow.html?theme=dark)，或用瀏覽器開啟本機的 [`docs/workflow.html`](docs/workflow.html)。
+The interactive diagram can be zoomed and searched, and it highlights the path between any two steps: [view it online](https://raw.githack.com/recklight/acoustic-feature-lab/master/docs/workflow.html?theme=dark), or open the local [`docs/workflow.html`](docs/workflow.html) in a browser.
 
-臨床嗓音評估常以聽覺量表打分數：GRBAS 的 G 分數是 0–3 的序位等級（Hirano, 1981），CAPE-V 則在 0–100 的量尺上標記整體嚴重度（Kempster et al., 2009）。用聲學特徵預測這類連續分數是常見的研究題目（例如 Maryn et al., 2010 結合多個聲學指標的模型），但光是 MFCC 就有一串會改變結果的細節：框長與位移、濾波器數量與頻率下限、倒頻譜係數個數、用 `c0` 還是對數能量、要不要加 Δ 與 ΔΔ（也就是 13、26 或 39 維），以及音框怎麼彙整成一個語句向量。RMSE 差了一兩分，是設定造成的還是交叉驗證本身的波動，只看一次切分分不出來。
+Clinical voice assessment usually scores a voice on a perceptual scale: the G score of GRBAS is an ordinal grade from 0 to 3 (Hirano, 1981), and CAPE-V marks overall severity on a 0–100 scale (Kempster et al., 2009). Predicting such continuous scores from acoustic features is a common research question (Maryn et al., 2010, for example, combine several acoustic measures in one model), but MFCCs alone come with a list of details that change the result: frame length and hop, the number of filters and their lower frequency limit, the number of cepstral coefficients, `c0` or log energy, whether to add Δ and ΔΔ (that is, 13, 26 or 39 dimensions), and how the frames are pooled into one utterance vector. When RMSE moves by a point or two, a single split cannot tell whether the setting caused it or the cross-validation itself varies that much.
 
-所以這裡每個選擇都是設定檔裡的一個鍵，所有設定組合都在同一組依受試者分組的切分上評估，比較時用考慮訓練集重疊的修正 t 檢定，再以 Holm 法校正多重比較；迴歸分析除了樣本內的 $R^2$，也輸出殘差診斷與樣本外的誤差。預強調、分框、梅爾濾波器組、Δ 迴歸、HTK 檔案讀寫、端點偵測與 UAR 這些共用元件來自 [`speechdsp`](https://pypi.org/project/speechdsp/)。
+So every one of these choices is a key in the configuration file. All combinations are evaluated on the same speaker-grouped splits and compared with a corrected t-test that accounts for the overlap between training sets, with Holm's method for multiple comparisons. Regression analysis reports residual diagnostics and out-of-sample error alongside the in-sample $R^2$. The shared building blocks (pre-emphasis, framing, the mel filterbank, Δ regression, HTK file I/O, endpoint detection and UAR) come from [`speechdsp`](https://pypi.org/project/speechdsp/).
 
-| 階段 | 做什麼 | 對應模組 |
+| Stage | What it does | Module |
 | --- | --- | --- |
-| 1. 讀取錄音 | 單聲道 float64、可重新取樣、以秒為單位修剪頭尾、可選端點偵測 | `corpus` |
-| 2. 倒頻譜前端 | 預強調、對稱 Hamming 窗、梅爾濾波器組、HTK 縮放 DCT、倒頻譜提升、能量項、Δ／ΔΔ | `cepstral_frontend` |
-| 3. 語句彙整 | 平均、標準差、極值、百分位數、偏態、峰態，可先做 CMN／CMVN | `pooling` |
-| 4. 資料集與特徵檔 | `dataset.csv` 索引、`features.npz`、從評分表建立索引 | `dataset`、`pipeline` |
-| 5. 模型 | 迴歸與分類估計器、PCA／LDA、巢狀交叉驗證調參、模型檔 | `models`、`neural` |
-| 6. 評估 | 分組或分層 k 折、迴歸與分類指標 | `splitting`、`evaluation` |
-| 7. Ablation | 展開特徵設定網格、共用切分、成對顯著性檢定 | `ablation` |
-| 8. 迴歸分析 | 最小平方推論、殘差診斷、逐步選擇、多項式階數、梯度下降 | `ols`、`regression_diagnostics`、`stepwise`、`design_matrix`、`polynomial_order`、`gradient_descent` |
-| 9. 相關與一致性 | Pearson（Fisher z 區間）、Spearman、Lin's CCC、Bland–Altman | `association` |
-| 10. 輸出 | 圖與同內容的 CSV、`config.yaml`、`manifest.json` | `figures`、`manifest` |
-| 11. 合成資料 | 嚴重度可控的合成持續母音與迴歸練習資料，供測試、範例與快速開始使用 | `synthetic` |
+| 1. Load recordings | Mono float64, optional resampling, head and tail trimming in seconds, optional endpoint detection | `corpus` |
+| 2. Cepstral front end | Pre-emphasis, symmetric Hamming window, mel filterbank, HTK-scaled DCT, liftering, energy term, Δ/ΔΔ | `cepstral_frontend` |
+| 3. Utterance pooling | Mean, standard deviation, extremes, percentiles, skewness, kurtosis, with optional CMN/CMVN first | `pooling` |
+| 4. Dataset and feature file | `dataset.csv` index, `features.npz`, building the index from a ratings table | `dataset`, `pipeline` |
+| 5. Models | Regression and classification estimators, PCA/LDA, tuning by nested cross-validation, model files | `models`, `neural` |
+| 6. Evaluation | Grouped or stratified k-fold, regression and classification metrics | `splitting`, `evaluation` |
+| 7. Ablation | Expanding the feature-setting grid, shared splits, paired significance tests | `ablation` |
+| 8. Regression analysis | Least-squares inference, residual diagnostics, stepwise selection, polynomial order, gradient descent | `ols`, `regression_diagnostics`, `stepwise`, `design_matrix`, `polynomial_order`, `gradient_descent` |
+| 9. Correlation and agreement | Pearson (Fisher z interval), Spearman, Lin's CCC, Bland–Altman | `association` |
+| 10. Output | Figures with a CSV of the same data, `config.yaml`, `manifest.json` | `figures`, `manifest` |
+| 11. Synthetic data | Synthetic sustained vowels with controllable severity, and toy regression datasets, used by the tests, the examples and the quick start | `synthetic` |
 
 ---
 
-## 方法說明
+## Method
 
-### 1. 倒頻譜前端（MFCC）
+### 1. Cepstral front end (MFCC)
 
-整段訊號先經過預強調 $y[n] = x[n] - a\,x[n-1]$（第一個樣本原樣保留），再以 `frame_ms`／`hop_ms` 分框；毫秒依**每個檔案實際的取樣率**換算成樣本數（無條件捨去，所以 44.1 kHz 下 30／15 ms 是 1323／661 點，16 kHz 下是 480／240 點）。每框乘上分析窗後做 `n_fft` 點 FFT，功率譜 $|X_k|^2$ 乘上 `n_mels` 個峰值為 1 的三角濾波器；濾波器邊界在梅爾刻度 $m(f) = 1127 \ln(1 + f/700)$ 上等距（Stevens et al., 1937；O'Shaughnessy, 1987），從 `fmin_hz` 到 `fmax_hz`。濾波器能量取自然對數前先套用下限 `log_floor`，所以全零的框也不會產生 $-\infty$。接著以 HTK 慣例的 DCT-II 取倒頻譜（Davis & Mermelstein, 1980；Young et al., 2006）：
+The whole signal is first pre-emphasized, $y[n] = x[n] - a\,x[n-1]$ (the first sample is kept as it is), then cut into frames by `frame_ms`/`hop_ms`. Milliseconds are converted to samples at **each file's actual sample rate**, rounding down, so 30/15 ms is 1323/661 samples at 44.1 kHz and 480/240 samples at 16 kHz. Each frame is multiplied by the analysis window and goes through an `n_fft`-point FFT, and the power spectrum $|X_k|^2$ is weighted by `n_mels` triangular filters, each with a peak of 1. The filter edges are equally spaced on the mel scale $m(f) = 1127 \ln(1 + f/700)$ (Stevens et al., 1937; O'Shaughnessy, 1987), from `fmin_hz` to `fmax_hz`. The filter energies get a floor, `log_floor`, before the natural log, so an all-zero frame does not produce $-\infty$. The cepstrum is then taken with the DCT-II in its HTK form (Davis & Mermelstein, 1980; Young et al., 2006):
 
 $$c_m = \sqrt{\frac{2}{N}} \sum_{n=1}^{N} \log E_n \cos\left(\frac{\pi m (n - 0.5)}{N}\right), \qquad m = 0, \dots, M$$
 
-這個縮放對 $m \ge 1$ 與 SciPy 的正交 DCT 相同，$c_0$ 則大 $\sqrt 2$ 倍（doctest 會驗證這個關係）。$c_1 \dots c_M$ 再乘上正弦提升 $1 + \tfrac{L}{2}\sin(\pi m / L)$（Juang et al., 1987）。能量項依 HTK 的排列放在倒頻譜之後：`c0`、原始框的對數能量 `log_e`（和 ETSI 前端的 logE、HTK 預設的 raw energy 一樣，在預強調與加窗之前計算），或不加。
+For $m \ge 1$ this scaling matches SciPy's orthonormal DCT, while $c_0$ is larger by a factor of $\sqrt 2$ (a doctest checks the relation). $c_1 \dots c_M$ are then multiplied by the sinusoidal lifter $1 + \tfrac{L}{2}\sin(\pi m / L)$ (Juang et al., 1987). The energy term comes after the cepstra, in HTK's order: `c0`, the log energy of the raw frame `log_e` (computed before pre-emphasis and windowing, like logE in the ETSI front end and HTK's default raw energy), or nothing.
 
-預設值沿用分散式語音辨識前端（ETSI ES 201 108）的濾波器組：64 Hz 到 Nyquist 頻率之間 23 個濾波器、預強調 0.97、對稱 Hamming 窗、12 個倒頻譜係數加 `c0`；但它**不是**該標準的完整重現：框長與位移是 30／15 ms（標準為 25／10 ms），濾波器作用在功率譜而非振幅譜，倒頻譜採 HTK 縮放並經過提升。
+The defaults follow the filterbank of the distributed speech recognition front end (ETSI ES 201 108): 23 filters between 64 Hz and the Nyquist frequency, pre-emphasis 0.97, a symmetric Hamming window, and 12 cepstral coefficients plus `c0`. It is **not** a full reproduction of that standard: frames are 30/15 ms (the standard uses 25/10 ms), the filters act on the power spectrum rather than the magnitude spectrum, and the cepstrum uses HTK scaling and is liftered.
 
-`speechdsp` 的 `mfcc()` 是一組固定的配方（週期 Hamming 窗、濾波器從 0 Hz 起、正交 DCT、第 0 維放對數能量而不是 `c0`），偏偏這些選擇就是這裡要比較的對象，所以前端只拿 `speechdsp` 的預強調、分框、梅爾濾波器組與 Δ 當元件，窗函數、功率譜、DCT 縮放與能量項的組合由專案自己處理。把設定調成與 `speechdsp.mfcc()` 相同時，兩者算出的 $c_1 \dots c_{12}$ 逐值一致（`tests/test_cepstral_frontend.py` 驗證）。
+`mfcc()` in `speechdsp` is one fixed recipe (periodic Hamming window, filters starting at 0 Hz, orthonormal DCT, log energy instead of `c0` in dimension 0), and those choices are exactly what is being compared here. So the front end borrows only pre-emphasis, framing, the mel filterbank and Δ from `speechdsp`, and handles the window, power spectrum, DCT scaling and energy term itself. With the settings matched to `speechdsp.mfcc()`, the two agree value for value on $c_1 \dots c_{12}$ (checked in `tests/test_cepstral_frontend.py`).
 
-| 設定鍵 | 預設 | 作用 |
+| Key | Default | Effect |
 | --- | --- | --- |
-| `frontend.frame_ms` / `frontend.hop_ms` | 30.0 / 15.0 | 框長與位移（毫秒），依實際取樣率換算 |
-| `frontend.n_fft` | `null` | FFT 點數；`null` 取能容納一框的最小 2 的冪次 |
-| `frontend.window` | `hamming_symmetric` | 對稱 Hamming、週期 Hamming、Hann 或矩形窗 |
-| `frontend.preemphasis` | 0.97 | 預強調係數，0 表示不做 |
-| `frontend.n_mels` | 23 | 三角濾波器個數 |
-| `frontend.fmin_hz` / `frontend.fmax_hz` | 64.0 / `null` | 濾波器組頻率範圍；`null` 為 Nyquist 頻率 |
-| `frontend.n_ceps` | 12 | 倒頻譜係數 $c_1 \dots c_M$ 的個數（不含 $c_0$） |
-| `frontend.energy_term` | `c0` | `c0`、`log_energy` 或 `none` |
-| `frontend.lifter` | 22 | 正弦提升長度 $L$，0 表示不提升 |
-| `frontend.log_floor` | 1e-10 | 取對數前的能量下限 |
+| `frontend.frame_ms` / `frontend.hop_ms` | 30.0 / 15.0 | Frame length and hop in milliseconds, converted at the actual sample rate |
+| `frontend.n_fft` | `null` | FFT size; `null` takes the smallest power of 2 that holds one frame |
+| `frontend.window` | `hamming_symmetric` | Symmetric Hamming, periodic Hamming, Hann or rectangular window |
+| `frontend.preemphasis` | 0.97 | Pre-emphasis coefficient; 0 turns it off |
+| `frontend.n_mels` | 23 | Number of triangular filters |
+| `frontend.fmin_hz` / `frontend.fmax_hz` | 64.0 / `null` | Frequency range of the filterbank; `null` is the Nyquist frequency |
+| `frontend.n_ceps` | 12 | Number of cepstral coefficients $c_1 \dots c_M$ (not counting $c_0$) |
+| `frontend.energy_term` | `c0` | `c0`, `log_energy` or `none` |
+| `frontend.lifter` | 22 | Sinusoidal lifter length $L$; 0 turns liftering off |
+| `frontend.log_floor` | 1e-10 | Energy floor before the log |
 
-### 2. 動態特徵與 13／26／39 維版面
+### 2. Dynamic features and the 13/26/39-dimensional layouts
 
-Δ 以迴歸係數計算（Furui, 1986），邊界以複製頭尾框的方式處理：
+Δ is computed as a regression coefficient (Furui, 1986), with the first and last frames repeated at the edges:
 
 $$d_t = \frac{\sum_{n=1}^{N} n\,(c_{t+n} - c_{t-n})}{2 \sum_{n=1}^{N} n^2}$$
 
-Δ 使用 $N = 3$（7 框窗），ΔΔ 是對 Δ 再取一次、$N = 2$（5 框窗）。`delta_order` 為 0、1、2 時，每框分別是 13、26、39 維，排列為 `[static | Δ | ΔΔ]`；`feature_layout()` 會產生 `c1 … c12, c0, d_c1 …, dd_c0` 這樣的欄名，讓每個結果都能追溯到哪一欄特徵。
+Δ uses $N = 3$ (a 7-frame window), and ΔΔ applies the same formula to Δ with $N = 2$ (a 5-frame window). With `delta_order` set to 0, 1 or 2, each frame has 13, 26 or 39 dimensions, ordered `[static | Δ | ΔΔ]`. `feature_layout()` produces column names such as `c1 … c12, c0, d_c1 …, dd_c0`, so every result can be traced back to the feature column it came from.
 
-| 設定鍵 | 預設 | 作用 |
+| Key | Default | Effect |
 | --- | --- | --- |
-| `frontend.delta_order` | 2 | 0 只用靜態特徵、1 加 Δ、2 加 Δ 與 ΔΔ |
-| `frontend.delta_widths` | `[7, 5]` | Δ 與 ΔΔ 的迴歸窗長（奇數） |
+| `frontend.delta_order` | 2 | 0 for static features only, 1 adds Δ, 2 adds Δ and ΔΔ |
+| `frontend.delta_widths` | `[7, 5]` | Regression window lengths for Δ and ΔΔ (odd) |
 
-### 3. 語句層級彙整
+### 3. Utterance-level pooling
 
-迴歸模型需要每段錄音一個向量，所以把該錄音所有框的每一欄做統計：平均、標準差、最小值、最大值、百分位數、偏態與超額峰態（後兩者是有偏的動差比，常數欄位定義為 0）。輸出以統計量為主序排列，欄名像 `mean_c1`、`std_d_c0`、`p90_c12`。彙整前可以先對每段錄音做倒頻譜平均正規化（CMN）或平均變異數正規化（CMVN）；會讓統計量對所有錄音都相同的組合（CMN 後取平均、CMVN 後取平均或標準差）會直接報錯，免得產生一整欄常數。
+A regression model needs one vector per recording, so each column is summarized over all frames of the recording: mean, standard deviation, minimum, maximum, percentiles, skewness and excess kurtosis (the last two are biased moment ratios, defined as 0 for a constant column). The output is ordered statistic-major, with column names like `mean_c1`, `std_d_c0` and `p90_c12`. Before pooling, each recording can be given cepstral mean normalization (CMN) or cepstral mean and variance normalization (CMVN). Combinations that would make a statistic identical for every recording (the mean after CMN, the mean or standard deviation after CMVN) raise an error rather than produce a whole column of constants.
 
-| 設定鍵 | 預設 | 作用 |
+| Key | Default | Effect |
 | --- | --- | --- |
-| `pooling.statistics` | `[mean, std]` | 依序輸出的統計量 |
-| `pooling.percentiles` | `[10.0, 50.0, 90.0]` | `percentile` 使用的百分位 |
-| `pooling.normalization` | `none` | `none`、`cmn` 或 `cmvn` |
+| `pooling.statistics` | `[mean, std]` | Statistics, output in this order |
+| `pooling.percentiles` | `[10.0, 50.0, 90.0]` | Percentiles used by `percentile` |
+| `pooling.normalization` | `none` | `none`, `cmn` or `cmvn` |
 
-### 4. 迴歸與分類模型
+### 4. Regression and classification models
 
-每個模型都是 scikit-learn 的 `Pipeline`（Pedregosa et al., 2011）：`StandardScaler` → 降維（無、PCA，或分類任務的 LDA）→ 估計器，因此標準化與降維只在訓練折上學習。迴歸可選最小平方、Ridge（Hoerl & Kennard, 1970）、支援向量迴歸（Drucker et al., 1997）、隨機森林（Breiman, 2001）與多層感知器；分類可選 Logistic 迴歸、支援向量分類器、隨機森林與多層感知器。感知器隱藏層的活化函數由 `model.activation` 決定，迴歸與分類都預設 logistic。scikit-learn 的感知器依 Glorot & Bengio（2010）的正規化初始化設定權重（範圍 $\pm\sqrt{6/(n_{in}+n_{out})}$，logistic 活化時把 6 換成 2）；另有放在 `dl` extra 的 PyTorch 感知器（Adam 最佳化，Kingma & Ba, 2015），權重沿用 PyTorch 預設的 $\pm 1/\sqrt{n_{in}}$ 均勻初始化，也就是 Glorot & Bengio 式 (1) 的常用作法，在 CPU 上訓練。SVR 與迴歸感知器預測的是標準化後的目標，所以 `svr_epsilon` 的單位是評分的標準差。LDA 最多只有 $C - 1$ 個判別方向（Fisher, 1936），要求更多會直接報錯。`model.tune` 開啟時，每個訓練折會再做一次內層交叉驗證，從小網格中挑超參數後重新擬合，外層折因此評估的是「含調參的整個流程」（Varma & Simon, 2006）。
+Every model is a scikit-learn `Pipeline` (Pedregosa et al., 2011): `StandardScaler` → dimensionality reduction (none, PCA, or LDA for classification) → estimator, so scaling and reduction are learned on the training folds only. For regression there are least squares, Ridge (Hoerl & Kennard, 1970), support vector regression (Drucker et al., 1997), random forest (Breiman, 2001) and a multilayer perceptron; for classification, logistic regression, a support vector classifier, random forest and a multilayer perceptron. The activation of the perceptron's hidden layers is set by `model.activation` and defaults to logistic for both regression and classification. The scikit-learn perceptron sets its weights with the normalized initialization of Glorot & Bengio (2010) (range $\pm\sqrt{6/(n_{in}+n_{out})}$, with 2 in place of 6 for logistic activation). There is also a PyTorch perceptron in the `dl` extra (Adam optimizer, Kingma & Ba, 2015); its weights keep PyTorch's default uniform initialization in $\pm 1/\sqrt{n_{in}}$, the common heuristic from Glorot & Bengio's equation (1), and it trains on the CPU. SVR and the regression perceptron predict the standardized target, so `svr_epsilon` is in units of the rating's standard deviation. LDA has at most $C - 1$ discriminant directions (Fisher, 1936); asking for more raises an error. With `model.tune` on, each training fold runs an inner cross-validation, picks hyperparameters from a small grid and refits, so the outer folds evaluate the whole procedure, tuning included (Varma & Simon, 2006).
 
-| 設定鍵 | 預設 | 作用 |
+| Key | Default | Effect |
 | --- | --- | --- |
-| `data.task` | `regression` | `regression` 或 `classification` |
-| `data.target` | `severity` | `dataset.csv` 中的目標欄位 |
-| `model.name` | `ridge` | 迴歸：`linear`、`ridge`、`svr`、`random_forest`、`mlp`、`torch_mlp`；分類：`logistic`、`svc`、`random_forest`、`mlp`、`torch_mlp` |
-| `model.reducer` / `model.n_components` | `none` / `null` | 降維方式與維度；`null` 為 PCA 保留 95 % 變異或 LDA 取 $C-1$ |
-| `model.tune` | `false` | 巢狀交叉驗證調參 |
-| `model.ridge_alpha`、`model.svr_c`、`model.svr_epsilon` | 1.0、1.0、0.1 | 迴歸超參數 |
-| `model.hidden_units`、`model.activation`、`model.mlp_alpha` | `[100]`、`logistic`、1e-4 | 感知器結構與 L2 懲罰 |
-| `model.early_stopping` / `model.patience` | `false` / 50 | 只用於 scikit-learn 感知器：是否以訓練折內 10 % 的驗證集提前停止；`patience` 是容許沒有進步的 epoch 數，關閉提前停止時看的是訓練損失 |
+| `data.task` | `regression` | `regression` or `classification` |
+| `data.target` | `severity` | Target column in `dataset.csv` |
+| `model.name` | `ridge` | Regression: `linear`, `ridge`, `svr`, `random_forest`, `mlp`, `torch_mlp`; classification: `logistic`, `svc`, `random_forest`, `mlp`, `torch_mlp` |
+| `model.reducer` / `model.n_components` | `none` / `null` | Reduction method and dimension; `null` keeps 95% of the variance for PCA, or $C-1$ for LDA |
+| `model.tune` | `false` | Tuning by nested cross-validation |
+| `model.ridge_alpha`, `model.svr_c`, `model.svr_epsilon` | 1.0, 1.0, 0.1 | Regression hyperparameters |
+| `model.hidden_units`, `model.activation`, `model.mlp_alpha` | `[100]`, `logistic`, 1e-4 | Perceptron architecture and L2 penalty |
+| `model.early_stopping` / `model.patience` | `false` / 50 | scikit-learn perceptron only: whether to stop early on a validation set of 10% of the training fold; `patience` is the number of epochs allowed without improvement, judged on the training loss when early stopping is off |
 
-內層調參的網格：Ridge 的 `alpha` ∈ {0.01, 0.1, 1, 10, 100}；SVR 的 `C` ∈ {0.1, 1, 10} × `epsilon` ∈ {0.05, 0.1, 0.5}；隨機森林的 `max_depth` ∈ {無限制, 4, 8} × `min_samples_leaf` ∈ {1, 3}；感知器的 `alpha` ∈ {1e-4, 1e-2, 1}；Logistic 的 `C` ∈ {0.01, 0.1, 1, 10}；SVC 的 `C` ∈ {0.1, 1, 10}。迴歸以 RMSE、分類以 UAR 選擇。
+The inner tuning grids are: Ridge `alpha` ∈ {0.01, 0.1, 1, 10, 100}; SVR `C` ∈ {0.1, 1, 10} × `epsilon` ∈ {0.05, 0.1, 0.5}; random forest `max_depth` ∈ {unlimited, 4, 8} × `min_samples_leaf` ∈ {1, 3}; perceptron `alpha` ∈ {1e-4, 1e-2, 1}; logistic `C` ∈ {0.01, 0.1, 1, 10}; SVC `C` ∈ {0.1, 1, 10}. Selection is by RMSE for regression and by UAR for classification.
 
-### 5. 交叉驗證與評估指標
+### 5. Cross-validation and metrics
 
-外層評估與內層調參都用 k 折交叉驗證（Stone, 1974）。分類使用分層 k 折，資料集有 `group` 欄（受試者）時則用分層分組 k 折；迴歸使用打亂的 k 折，有分組時依 `GroupKFold` 的規則，由大到小把每位受試者的錄音整組放進目前錄音最少的一折。大小相同的組誰先放由種子決定，而不是交給排序演算法：NumPy 各版本的 `argsort` 對相同值的排列不一樣，交給它的話，同一個種子在不同環境會切出不同的折。同一位受試者的錄音永遠在同一折，避免模型「認得受試者」造成的樂觀偏差；以錄音而不是受試者切分，會高估對新受試者的表現（Saeb et al., 2017）。
+Both the outer evaluation and the inner tuning use k-fold cross-validation (Stone, 1974). Classification uses stratified k-fold, or stratified group k-fold when the dataset has a `group` column (the speaker). Regression uses shuffled k-fold; with groups it follows the `GroupKFold` rule, placing each speaker's recordings as a whole, largest group first, into the fold that currently holds the fewest recordings. Among groups of equal size the seed decides which goes first, rather than the sort algorithm: `argsort` orders ties differently from one NumPy version to the next, and leaving it to `argsort` would give the same seed different folds in different environments. All recordings of one speaker always fall in the same fold, which avoids the optimistic bias of a model that has learned to recognize the speaker; splitting by recording instead of by speaker overestimates performance on new speakers (Saeb et al., 2017).
 
-迴歸指標為 MAE、RMSE、$R^2$、Pearson $r$、Spearman $\rho$ 與 Lin 的一致性相關係數（CCC）；分類指標為未加權平均召回率（UAR，Schuller et al., 2009）、準確率、macro F1，二類問題再加敏感度、特異度與 ROC-AUC，`evaluation.positive_class` 指定哪一類是陽性。每個指標都報告各折的值、各折平均與樣本標準差（`ddof=1`），以及把所有 out-of-fold 預測合併後計算的 pooled 值。
+The regression metrics are MAE, RMSE, $R^2$, Pearson $r$, Spearman $\rho$ and Lin's concordance correlation coefficient (CCC). The classification metrics are unweighted average recall (UAR, Schuller et al., 2009), accuracy and macro F1, plus sensitivity, specificity and ROC-AUC for two-class problems, where `evaluation.positive_class` names the positive class. Every metric is reported per fold, as the mean and sample standard deviation over the folds (`ddof=1`), and as a pooled value computed from all out-of-fold predictions together.
 
-| 設定鍵 | 預設 | 作用 |
+| Key | Default | Effect |
 | --- | --- | --- |
-| `evaluation.n_splits` | 5 | 外層折數 |
-| `evaluation.n_inner_splits` | 3 | 內層調參折數 |
-| `evaluation.positive_class` | `dysphonic` | 二類問題的陽性類別 |
-| `seed` | 0 | 切分、模型初始化與合成資料的主種子 |
+| `evaluation.n_splits` | 5 | Number of outer folds |
+| `evaluation.n_inner_splits` | 3 | Number of inner tuning folds |
+| `evaluation.positive_class` | `dysphonic` | Positive class for two-class problems |
+| `seed` | 0 | Master seed for the splits, model initialization and synthetic data |
 
-### 6. 特徵設定的 ablation 與顯著性檢定
+### 6. Feature-setting ablation and significance tests
 
-`ablation` 區段的每個清單是網格的一個維度：`n_ceps`、`n_mels`、`delta_order`、`energy_term`、`frame_hop_ms`、`lifter`、`statistics`、`reducer`、`models`；空清單表示沿用 `frontend`／`pooling`／`model` 的值。網格展開成所有組合，**每個清單的第一個值組成基準設定**。每個組合都以 `evaluation.n_splits` 折重複 `ablation.n_repeats` 次評估，而切分只取決於目標、群組與種子，所以所有設定都用**完全相同**的折，分數可以成對比較。靜態倒頻譜依前端設定（不含 Δ 設定）只計算一次，再依各組合補上 Δ；`--cache-dir` 可把它們存到磁碟供下次使用。網格與其他區段是否相容（例如 `ablation.models` 是否符合 `data.task`、最多的倒頻譜數是否少於最少的濾波器數）在 `ablate` 展開網格時、開始計算之前檢查，所以為另一個任務或前端寫的網格不會擋住 `prepare`、`evaluate` 與 `train`。
+Each list in the `ablation` section is one axis of the grid: `n_ceps`, `n_mels`, `delta_order`, `energy_term`, `frame_hop_ms`, `lifter`, `statistics`, `reducer`, `models`. An empty list keeps the value from `frontend`/`pooling`/`model`. The grid expands into every combination, and **the first value of each list makes up the baseline**. Each combination is evaluated with `evaluation.n_splits` folds repeated `ablation.n_repeats` times. The splits depend only on the target, the groups and the seed, so every setting sees **exactly the same** folds and the scores can be compared in pairs. Static cepstra are computed only once per front-end setting (Δ settings aside), and Δ is added for each combination; `--cache-dir` stores them on disk for the next run. `ablate` checks that the grid fits the other sections (for example that `ablation.models` matches `data.task`, and that the largest number of cepstra is below the smallest number of filters) when it expands the grid, before any computation starts. A grid written for another task or front end therefore does not get in the way of `prepare`, `evaluate` and `train`.
 
-設定 $s$ 與基準 $b$ 在 $J = k \times r$ 個折上的差 $d_j = \text{metric}_s - \text{metric}_b$，以 Nadeau–Bengio 修正的重抽樣 t 檢定比較（Nadeau & Bengio, 2003）：
+For a setting $s$ and the baseline $b$, the per-fold differences $d_j = \text{metric}_s - \text{metric}_b$ over $J = k \times r$ folds are tested with the resampled t-test, using the Nadeau–Bengio correction (Nadeau & Bengio, 2003):
 
 $$t = \frac{\bar d}{\sqrt{\left(\frac{1}{J} + \frac{n_{test}}{n_{train}}\right) s_d^2}}, \qquad \text{df} = J - 1$$
 
-修正項 $n_{test}/n_{train}$ 反映各折訓練集彼此重疊、分數並不獨立；忽略它的一般成對 t 檢定會嚴重高估顯著性。另附 Wilcoxon 符號等級檢定（Demšar, 2006）作為無母數的參考，兩組 p 值各自以 Holm 法（Holm, 1979）或 Benjamini–Hochberg 法（Benjamini & Hochberg, 1995）校正。
+The term $n_{test}/n_{train}$ reflects that the training sets of the folds overlap, so the scores are not independent; an ordinary paired t-test that ignores it badly overstates significance. A Wilcoxon signed-rank test (Demšar, 2006) is included as a nonparametric reference, and each of the two sets of p-values is corrected with Holm's method (Holm, 1979) or with Benjamini–Hochberg (Benjamini & Hochberg, 1995).
 
-| 設定鍵 | 預設 | 作用 |
+| Key | Default | Effect |
 | --- | --- | --- |
-| `ablation.n_ceps` | `[12, 6, 18]` | 要比較的倒頻譜數（第一個為基準） |
-| `ablation.delta_order` | `[0, 1, 2]` | 13／26／39 維 |
-| `ablation.models` | `[ridge, svr]` | 要比較的估計器 |
-| `ablation.n_repeats` | 3 | k 折重複次數 |
-| `ablation.metric` | `null` | 排名與檢定的指標；`null` 為 RMSE（迴歸）或 UAR（分類） |
-| `analysis.correction` | `holm` | `holm` 或 `fdr_bh` |
+| `ablation.n_ceps` | `[12, 6, 18]` | Numbers of cepstra to compare (the first is the baseline) |
+| `ablation.delta_order` | `[0, 1, 2]` | 13/26/39 dimensions |
+| `ablation.models` | `[ridge, svr]` | Estimators to compare |
+| `ablation.n_repeats` | 3 | Number of k-fold repeats |
+| `ablation.metric` | `null` | Metric for ranking and testing; `null` means RMSE (regression) or UAR (classification) |
+| `analysis.correction` | `holm` | `holm` or `fdr_bh` |
 
-### 7. 最小平方推論與殘差診斷
+### 7. Least-squares inference and residual diagnostics
 
-對設計矩陣 $X$（$n \times p$，含截距）以 QR 分解求 $\hat\beta = \arg\min \lVert y - X\beta \rVert^2$（Draper & Smith, 1998），並報告：
+For a design matrix $X$ ($n \times p$, intercept included), $\hat\beta = \arg\min \lVert y - X\beta \rVert^2$ is solved by QR decomposition (Draper & Smith, 1998), and the report gives
 
 $$\hat\sigma^2 = \frac{\text{RSS}}{n-p}, \quad \text{SE}(\hat\beta_j) = \hat\sigma\sqrt{[(X^\top X)^{-1}]_{jj}}, \quad R^2 = 1 - \frac{\text{RSS}}{\text{TSS}}, \quad \bar R^2 = 1 - (1-R^2)\frac{n-1}{n-p}, \quad F = \frac{\text{ESS}/(p-1)}{\text{RSS}/(n-p)}$$
 
-以及 $t$ 分布的信賴區間、高斯對數概似、AIC（Akaike, 1974）與 BIC（Schwarz, 1978）和設計矩陣的條件數。參數個數等於觀測數時殘差自由度為 0，模型只是內插資料：標準誤、檢定與 $R^2$ 一律輸出 NaN 並標記為「不可估計」；參數多於觀測或欄位線性相依時直接報錯。
+together with $t$-based confidence intervals, the Gaussian log-likelihood, AIC (Akaike, 1974), BIC (Schwarz, 1978) and the condition number of the design matrix. When there are as many parameters as observations, the residual degrees of freedom are 0 and the model merely interpolates the data: standard errors, tests and $R^2$ are all output as NaN and marked as not estimable. More parameters than observations, or linearly dependent columns, raise an error.
 
-殘差診斷包括 Shapiro–Wilk（Shapiro & Wilk, 1965）與 Jarque–Bera（Jarque & Bera, 1980）常態檢定、以 $nR^2$ 計算的 Breusch–Pagan 異質變異數檢定（Breusch & Pagan, 1979；Koenker, 1981）、Durbin–Watson 統計量（Durbin & Watson, 1950）、hat 矩陣對角線的 leverage、Cook's distance（Cook, 1977）$D_i = \frac{e_i^2}{p\hat\sigma^2}\frac{h_{ii}}{(1-h_{ii})^2}$，以及變異數膨脹因子 $\text{VIF}_j = 1/(1 - R_j^2)$（Marquardt, 1970）。二階反應曲面 $y = \beta_0 + \sum_i \beta_i x_i + \sum_i \beta_{ii} x_i^2 + \sum_{i<j} \beta_{ij} x_i x_j$（Box & Wilson, 1951）以中心化後的變數建構，避免 $x$ 與 $x^2$ 幾乎共線。
+The residual diagnostics are the Shapiro–Wilk (Shapiro & Wilk, 1965) and Jarque–Bera (Jarque & Bera, 1980) normality tests, the Breusch–Pagan test for heteroscedasticity computed as $nR^2$ (Breusch & Pagan, 1979; Koenker, 1981), the Durbin–Watson statistic (Durbin & Watson, 1950), leverage from the diagonal of the hat matrix, Cook's distance (Cook, 1977) $D_i = \frac{e_i^2}{p\hat\sigma^2}\frac{h_{ii}}{(1-h_{ii})^2}$, and the variance inflation factor $\text{VIF}_j = 1/(1 - R_j^2)$ (Marquardt, 1970). The second-order response surface $y = \beta_0 + \sum_i \beta_i x_i + \sum_i \beta_{ii} x_i^2 + \sum_{i<j} \beta_{ij} x_i x_j$ (Box & Wilson, 1951) is built from centered variables, so that $x$ and $x^2$ are not nearly collinear.
 
-| 設定鍵 | 預設 | 作用 |
+| Key | Default | Effect |
 | --- | --- | --- |
-| `analysis.ci_level` | 0.95 | 係數與相關係數信賴區間的水準 |
+| `analysis.ci_level` | 0.95 | Level of the confidence intervals for coefficients and correlation coefficients |
 
-### 8. 逐步選擇、多項式階數與梯度下降
+### 8. Stepwise selection, polynomial order and gradient descent
 
-逐步選擇從空模型（或全模型）出發，每一步先嘗試加入偏 F 檢定 p 值最小且低於 `p_enter` 的變數，沒有可加入者才嘗試移除 p 值最大且高於 `p_remove` 的變數，兩者皆無時停止（Efroymson, 1960）；要求 `p_enter ≤ p_remove` 並記錄走過的模型，避免無限循環。每一步的動作、F、p、$R^2$ 與調整後 $R^2$ 都會寫出。被選出的模型應再看 VIF 並做樣本外驗證，因為選擇過程用過的 p 值不能再當成推論。
+Stepwise selection starts from the empty model (or the full one). At each step it first tries to add the variable with the smallest partial-F p-value below `p_enter`; only when nothing can be added does it try to remove the variable with the largest p-value above `p_remove`, and it stops when neither is possible (Efroymson, 1960). It requires `p_enter ≤ p_remove` and records the models it has visited, so it cannot cycle forever. The action, F, p, $R^2$ and adjusted $R^2$ of every step are written out. Check the VIF of the selected model and validate it out of sample, because p-values that the selection has already used cannot be read as inference.
 
-多項式階數掃描對每一階同時列出樣本內的 $R^2$、調整後 $R^2$、整體 F 檢定、SSE、AIC、BIC，以及樣本外的留一法 RMSE（以 PRESS 殘差 $e_i/(1-h_{ii})$ 的閉式解計算）與 k 折 RMSE（每個訓練折重新建立多項式基底）。預設使用以三項遞迴建立的離散正交多項式
+The polynomial order sweep lists, for every order, the in-sample $R^2$, adjusted $R^2$, overall F-test, SSE, AIC and BIC, next to the out-of-sample leave-one-out RMSE (in closed form from the PRESS residuals $e_i/(1-h_{ii})$) and k-fold RMSE (with the polynomial basis rebuilt on each training fold). By default the basis is a set of discrete orthogonal polynomials built by the three-term recurrence
 
 $$p_{k+1}(x) = (x - a_k)\,p_k(x) - b_k\,p_{k-1}(x)$$
 
-各欄彼此正交、條件數為 1；未中心化的 $x^6$（例如 $x \approx 2000$ 的年份）會讓設計矩陣在數值上奇異。
+whose columns are mutually orthogonal, with a condition number of 1, whereas an uncentered $x^6$ (with years, say, where $x \approx 2000$) makes the design matrix numerically singular.
 
-梯度下降以向量化的同步更新 $\theta \leftarrow \theta - \frac{\alpha}{m} Z^\top (Z\theta - y)$ 最小化 $J = \frac{1}{2m}\lVert Z\theta - y\rVert^2$（Cauchy, 1847），先將變數標準化再把係數換回原單位；以成本的相對下降量判斷收斂，同時設有迭代上限並偵測發散，結果與閉式最小平方解比對。
+Gradient descent minimizes $J = \frac{1}{2m}\lVert Z\theta - y\rVert^2$ with the vectorized simultaneous update $\theta \leftarrow \theta - \frac{\alpha}{m} Z^\top (Z\theta - y)$ (Cauchy, 1847). The variables are standardized first and the coefficients converted back to the original units afterwards. Convergence is judged by the relative decrease of the cost, with an iteration cap and a divergence check, and the result is compared with the closed-form least-squares solution.
 
-| 設定鍵 | 預設 | 作用 |
+| Key | Default | Effect |
 | --- | --- | --- |
-| `analysis.p_enter` / `analysis.p_remove` | 0.05 / 0.10 | 逐步選擇的進入與移除門檻 |
-| `analysis.stepwise_start` | `empty` | `empty`（向前）或 `full`（向後） |
-| `analysis.max_degree` | 8 | 階數掃描的最高階 |
-| `analysis.polynomial_basis` | `orthogonal` | `orthogonal`、`centered` 或 `raw` |
-| `analysis.order_criterion` | `kfold_rmse` | 推薦階數的依據：`kfold_rmse`、`loocv_rmse`、`bic`、`aic` |
+| `analysis.p_enter` / `analysis.p_remove` | 0.05 / 0.10 | Entry and removal thresholds for stepwise selection |
+| `analysis.stepwise_start` | `empty` | `empty` (forward) or `full` (backward) |
+| `analysis.max_degree` | 8 | Highest order in the sweep |
+| `analysis.polynomial_basis` | `orthogonal` | `orthogonal`, `centered` or `raw` |
+| `analysis.order_criterion` | `kfold_rmse` | Criterion for the recommended order: `kfold_rmse`, `loocv_rmse`, `bic`, `aic` |
 
-### 9. 相關與一致性分析
+### 9. Correlation and agreement
 
-「特徵是否與評分一起變動」與「預測值是否**等於**臨床評分」是兩個不同的問題。前者對每一欄特徵計算 Pearson $r$ 與 Fisher $z$ 信賴區間 $\tanh(\operatorname{atanh} r \pm z_{1-\alpha/2}/\sqrt{n-3})$（Fisher, 1915），以及 Spearman 等級相關 $\rho$（Spearman, 1904），整組 p 值再做多重比較校正。後者使用 Lin 的一致性相關係數（Lin, 1989）
+Whether a feature moves together with the rating, and whether the predictions **equal** the clinical rating, are two different questions. For the first, every feature column gets Pearson $r$ with the Fisher $z$ confidence interval $\tanh(\operatorname{atanh} r \pm z_{1-\alpha/2}/\sqrt{n-3})$ (Fisher, 1915) and the Spearman rank correlation $\rho$ (Spearman, 1904), and the whole set of p-values is corrected for multiple comparisons. The second uses Lin's concordance correlation coefficient (Lin, 1989)
 
 $$\rho_c = \frac{2 s_{xy}}{s_x^2 + s_y^2 + (\bar x - \bar y)^2}$$
 
-它同時懲罰散布與系統性偏差（所有預測都高 10 分時 Pearson $r$ 仍為 1，但 $\rho_c$ 會下降），以及 Bland–Altman 分析的平均差與 95 % 一致性界限 $\bar d \pm 1.96\,s_d$（Bland & Altman, 1986）。`evaluate` 在迴歸任務中會自動輸出這兩項。
+which penalizes scatter and systematic bias at once (if every prediction is 10 points too high, Pearson $r$ is still 1 but $\rho_c$ drops). The second question also gets the Bland–Altman mean difference with 95% limits of agreement $\bar d \pm 1.96\,s_d$ (Bland & Altman, 1986). `evaluate` writes both automatically for regression tasks.
 
-### 10. 合成資料
+### 10. Synthetic data
 
-測試與範例全部使用程式產生的持續母音，生成方式是簡單的聲源–濾波器模型。聲源是 Rosenberg 聲門脈衝（Rosenberg, 1971），開啟相占週期 40 %、關閉相 16 %；每個週期的長度與振幅分別加上相對標準差為 jitter 與 shimmer 的高斯擾動。聲道是三個串接的二階共振峰濾波器，母音 /a/、/i/、/u/ 的共振峰取 Peterson & Barney（1952）的男聲平均值，再以一階差分模擬唇端輻射。最後加上經同一聲道濾波的白雜訊，強度依諧波雜訊比（HNR）調整。
+All tests and examples run on sustained vowels synthesized with a simple source–filter model. The source is the Rosenberg glottal pulse (Rosenberg, 1971), with the opening phase taking 40% of the period and the closing phase 16%; the length and amplitude of each period get Gaussian perturbations whose relative standard deviations are the jitter and the shimmer. The vocal tract is three second-order formant filters in cascade, with the formants of /a/, /i/ and /u/ taken from the male averages of Peterson & Barney (1952), followed by a first difference for lip radiation. Finally, white noise filtered by the same vocal tract is added at a level set by the harmonics-to-noise ratio (HNR).
 
-嚴重度 $s \in [0, 100]$ 讓 jitter、shimmer 與 HNR 在 `synthetic.*_range` 的兩端之間線性變化。每位受試者有自己的平均音高與嚴重度，同一人的各段錄音在嚴重度、母音、音高與音量上都有變化，所以模型必須從干擾變因中找出嚴重度線索，而 `group` 欄讓交叉驗證能把受試者分開。嚴重度大於等於 `label_threshold` 的錄音標為 `dysphonic`，其餘為 `healthy`，供分類任務使用。另有三組迴歸練習資料：已知係數的二階反應曲面、三次多項式，以及四個加總接近 100 % 的混合比例（刻意製造多重共線性）。
+Severity $s \in [0, 100]$ moves jitter, shimmer and HNR linearly between the two ends of `synthetic.*_range`. Each speaker has their own mean pitch and severity, and one speaker's recordings vary in severity, vowel, pitch and loudness, so a model has to find the severity cues among nuisance factors, while the `group` column lets cross-validation keep speakers apart. Recordings with a severity at or above `label_threshold` are labeled `dysphonic` and the rest `healthy`, for classification. There are also three toy datasets for the regression tools: a second-order response surface with known coefficients, a cubic polynomial, and four mixture proportions that add up to nearly 100% (multicollinear on purpose).
 
-| 設定鍵 | 預設 | 作用 |
+| Key | Default | Effect |
 | --- | --- | --- |
-| `synthetic.n_speakers` / `synthetic.n_recordings_per_speaker` | 20 / 3 | 受試者數與每人錄音數 |
-| `synthetic.duration_s` / `synthetic.sample_rate` | 1.0 / 16000 | 錄音長度與取樣率 |
-| `synthetic.jitter_range` | `[0.002, 0.03]` | 嚴重度 0 與 100 時的週期擾動 |
-| `synthetic.shimmer_range` | `[0.02, 0.3]` | 嚴重度 0 與 100 時的振幅擾動 |
-| `synthetic.hnr_range_db` | `[30.0, 6.0]` | 嚴重度 0 與 100 時的諧波雜訊比 |
-| `synthetic.label_threshold` | 35.0 | 分類標籤的門檻 |
+| `synthetic.n_speakers` / `synthetic.n_recordings_per_speaker` | 20 / 3 | Number of speakers and recordings per speaker |
+| `synthetic.duration_s` / `synthetic.sample_rate` | 1.0 / 16000 | Recording length and sample rate |
+| `synthetic.jitter_range` | `[0.002, 0.03]` | Period perturbation at severity 0 and 100 |
+| `synthetic.shimmer_range` | `[0.02, 0.3]` | Amplitude perturbation at severity 0 and 100 |
+| `synthetic.hnr_range_db` | `[30.0, 6.0]` | Harmonics-to-noise ratio at severity 0 and 100 |
+| `synthetic.label_threshold` | 35.0 | Threshold for the classification label |
 
 ---
 
-## 安裝步驟
+## Installation
 
-需要 Python 3.10 以上。
+Requires Python 3.10 or later.
 
 ```bash
 git clone https://github.com/recklight/acoustic-feature-lab.git
 cd acoustic-feature-lab
 python -m venv .venv
 # Windows: .venv\Scripts\activate    Linux/macOS: source .venv/bin/activate
-pip install -e .                 # 核心（會一併從 PyPI 安裝 speechdsp）
-pip install -e ".[dl]"           # PyTorch 模型（選用）
-pip install -e ".[dev]"          # 開發工具：pytest、ruff
+pip install -e .                 # core (also installs speechdsp from PyPI)
+pip install -e ".[dl]"           # PyTorch models (optional)
+pip install -e ".[dev]"          # development tools: pytest, ruff
 ```
 
-沒有安裝 PyTorch 時，除了 `torch_mlp` 以外的所有功能都能使用；設定成 `torch_mlp` 卻沒有安裝時，錯誤訊息會提示在專案資料夾執行 `pip install -e ".[dl]"`。也可以不安裝，直接在專案資料夾內以 `PYTHONPATH=src python -m acoustic_feature_lab --help` 執行。
+Without PyTorch, everything except `torch_mlp` works; if `torch_mlp` is configured but PyTorch is not installed, the error message says to run `pip install -e ".[dl]"` in the project folder. You can also skip installing and run `PYTHONPATH=src python -m acoustic_feature_lab --help` from inside the project folder.
 
 ---
 
-## 快速開始
+## Quick start
 
-不需要任何資料，以下指令會先產生合成資料集。
+No data is needed: the first command generates a synthetic dataset.
 
 ```bash
-# 1. 產生合成資料集
+# 1. Generate a synthetic dataset
 acoustic-feature-lab synthesize --config configs/quick_demo.yaml --out data/synthetic
-# 2. 由資料集索引準備模型輸入
+# 2. Prepare the model inputs from the dataset index
 acoustic-feature-lab prepare --config configs/quick_demo.yaml --out outputs/demo/prepare
-# 3. 交叉驗證
+# 3. Cross-validate
 acoustic-feature-lab evaluate outputs/demo/prepare/features.npz --config configs/quick_demo.yaml --out outputs/demo/evaluate
-# 4. 以全部資料訓練
+# 4. Train on all the data
 acoustic-feature-lab train outputs/demo/prepare/features.npz --config configs/quick_demo.yaml --out outputs/demo/train
-# 5. 對新的輸入檔推論
+# 5. Predict a new input file
 acoustic-feature-lab predict data/synthetic/items/item_000.wav --model outputs/demo/train/model.joblib --out outputs/demo/predict
 ```
 
-或一次跑完整個流程：`python examples/end_to_end_synthetic.py`。
+Or run the whole pipeline in one go: `python examples/end_to_end_synthetic.py`.
 
-> 這些指令跑出來的分數來自合成母音，只能確認流程跑得通；為什麼不能代表真實錄音，見[已知限制](#已知限制)第一點。
+> The scores from these commands come from synthetic vowels and only confirm that the pipeline runs. The first point under [Known limitations](#known-limitations) explains why they are not representative of real recordings.
 
 ---
 
-## 使用範例
+## Usage
 
 ### CLI
 
-以自己的錄音與評分表進行研究的典型流程：
+A typical study with your own recordings and ratings table:
 
 ```bash
-# 1. 由評分表建立資料集索引（ratings.csv 的欄位：id, severity, group）
+# 1. Build the dataset index from the ratings table (ratings.csv columns: id, severity, group)
 acoustic-feature-lab index data/recordings --targets data/ratings.csv
-# 2. 準備特徵：25 ms / 10 ms、26 個濾波器、對數能量（configs/compact_frontend.yaml）
+# 2. Prepare features: 25 ms / 10 ms, 26 filters, log energy (configs/compact_frontend.yaml)
 acoustic-feature-lab prepare --config configs/compact_frontend.yaml --dataset data/recordings/dataset.csv --out outputs/study/prepare
-# 3. 每一欄特徵與嚴重度的相關，Holm 校正
+# 3. Correlation of every feature column with severity, Holm-corrected
 acoustic-feature-lab correlate outputs/study/prepare/features.npz --out outputs/study/correlate
-# 4. 交叉驗證 SVR：以 --set 換模型並開啟巢狀調參，以 --seed 換切分
+# 4. Cross-validate SVR: --set switches the model and turns on nested tuning, --seed changes the splits
 acoustic-feature-lab evaluate outputs/study/prepare/features.npz --config configs/compact_frontend.yaml --set model.name=svr --set model.tune=true --seed 7 --out outputs/study/evaluate_svr
-# 5. 比較特徵設定：倒頻譜數 × 13／26／39 維 × 模型，靜態倒頻譜存入快取
+# 5. Compare feature settings: number of cepstra × 13/26/39 dimensions × model, with the static cepstra cached
 acoustic-feature-lab ablate --config configs/compact_frontend.yaml --dataset data/recordings/dataset.csv --out outputs/study/ablate --cache-dir outputs/study/cache
-# 6. 少數特徵的最小平方推論與殘差診斷
+# 6. Least-squares inference and residual diagnostics for a few features
 acoustic-feature-lab regress outputs/study/prepare/features.npz --predictors std_c8,mean_c10 --out outputs/study/regress
-# 7. 以全部資料訓練，再推論新錄音
+# 7. Train on all the data, then predict new recordings
 acoustic-feature-lab train outputs/study/prepare/features.npz --config configs/compact_frontend.yaml --out outputs/study/train
 acoustic-feature-lab predict data/new/visit_01.wav data/new/visit_02.wav --model outputs/study/train/model.joblib --out outputs/study/predict
 ```
 
-`regress`、`stepwise` 與 `order-sweep` 也接受一般的 CSV 表格，例如 `acoustic-feature-lab stepwise table.csv --target heat`、`acoustic-feature-lab order-sweep curve.csv --x year --target population`、`acoustic-feature-lab regress surface.csv --target y --design quadratic`。
+`regress`, `stepwise` and `order-sweep` also accept an ordinary CSV table, for example `acoustic-feature-lab stepwise table.csv --target heat`, `acoustic-feature-lab order-sweep curve.csv --x year --target population` or `acoustic-feature-lab regress surface.csv --target y --design quadratic`.
 
 ### Python API
 
@@ -302,7 +304,7 @@ from acoustic_feature_lab import (
     write_synthetic_dataset,
 )
 
-# 1. 低階：一段嚴重度 60 的合成母音 /a/，取 39 維音框特徵
+# 1. Low level: a synthetic /a/ at severity 60, 39-dimensional frame features
 signal = make_vowel(60.0, f0_hz=140.0, vowel="a", rng=0)
 frontend = FrontendConfig()
 frames = frame_features(signal, 16_000, frontend)
@@ -310,10 +312,10 @@ print(frames.shape)                                  # (65, 39)
 names = feature_layout(frontend)
 print(names[:2], names[12], names[13], names[-1])     # ('c1', 'c2') c0 d_c1 dd_c0
 
-# 2. 把所有框彙整成一個語句向量（39 欄 × 平均與標準差）
+# 2. Pool all frames into one utterance vector (39 columns × mean and std)
 print(pool_frames(frames, ["mean", "std"]).shape)    # (78,)
 
-# 3. 高階流程：合成資料集 → 特徵 → 依受試者分組的交叉驗證
+# 3. High level: synthetic dataset → features → speaker-grouped cross-validation
 config = Config.from_yaml("configs/quick_demo.yaml")
 index = write_synthetic_dataset("data/synthetic", config.synthetic, rng=config.seed)
 features = prepare_features(index, config)
@@ -321,137 +323,139 @@ print(features.X.shape)                              # (24, 78)
 result = cross_validate(features, config)
 print(result.metrics["summary"]["ccc"])              # {'mean': 0.835..., 'std': 0.166...}
 
-# 4. 特徵設定的 ablation：13 維對 39 維，同一組切分
+# 4. Feature-setting ablation: 13 vs. 39 dimensions on the same splits
 ablation = run_ablation(index, config)
 print(ablation.summary[["config_id", "n_features", "rmse_mean"]])
 #        config_id  n_features  rmse_mean
 # 0  delta_order=0          26  14.008524
 # 1  delta_order=2          78  16.212205
 
-# 5. 逐步選擇（選擇後的 p 值不能再當推論，請搭配樣本外驗證）
+# 5. Stepwise selection (p-values after selection are not inference; validate out of sample)
 X = pd.DataFrame(features.X, columns=features.feature_names)
 selection = stepwise_select(X, features.y, X.columns)
 print(selection.selected)                            # ('mean_c10', 'std_c4', 'std_c10', 'std_d_c9')
 ```
 
-### 範例腳本
+### Example scripts
 
-| 腳本 | 示範什麼 | 執行時間 |
+| Script | What it shows | Run time |
 | --- | --- | --- |
-| `examples/end_to_end_synthetic.py` | 合成資料 → 特徵 → 分組交叉驗證 → 訓練 → 推論 | 約 2 秒 |
-| `examples/compare_feature_settings.py` | 倒頻譜數 × Δ 階數 × 模型的 ablation，排名與修正 t 檢定 | 約 3 秒 |
-| `examples/compare_severity_regressors.py` | 五種迴歸器的 RMSE 與 CCC、Bland–Altman、特徵相關 | 約 3 秒 |
-| `examples/diagnose_regression_models.py` | 反應曲面 OLS、水泥資料的 VIF 與逐步選擇、殘差診斷 | 約 2 秒 |
-| `examples/select_polynomial_order.py` | 1–8 階掃描：樣本內 $R^2$ 與 LOOCV／k 折誤差的對照 | 約 2 秒 |
-| `examples/compare_gradient_descent_with_ols.py` | 學習率與標準化對梯度下降收斂的影響，與閉式解比對 | 約 2 秒 |
+| `examples/end_to_end_synthetic.py` | Synthetic data → features → grouped cross-validation → training → prediction | about 2 s |
+| `examples/compare_feature_settings.py` | Ablation of number of cepstra × Δ order × model, with ranking and corrected t-tests | about 3 s |
+| `examples/compare_severity_regressors.py` | RMSE and CCC of five regressors, Bland–Altman, feature correlations | about 3 s |
+| `examples/diagnose_regression_models.py` | Response-surface OLS, VIF and stepwise selection on the cement data, residual diagnostics | about 2 s |
+| `examples/select_polynomial_order.py` | Orders 1–8: in-sample $R^2$ vs. LOOCV/k-fold error | about 2 s |
+| `examples/compare_gradient_descent_with_ols.py` | How the learning rate and standardization affect convergence of gradient descent, checked against the closed form | about 2 s |
 
-每支腳本都接受 `--out`、`--seed` 與 `--quick`（讀 `configs/quick_demo.yaml`；梯度下降與迴歸診斷兩支用不到裡面不同於預設的設定，加不加結果都一樣），預設輸出到 `examples/output/<腳本名稱>/`。執行時間是本機的量測值，包含 Python 啟動。
+Every script takes `--out`, `--seed` and `--quick` (which reads `configs/quick_demo.yaml`; the gradient-descent and regression-diagnostics scripts use none of the settings in it that differ from the defaults, so their results are the same either way), and writes to `examples/output/<script name>/` by default. The run times were measured on my machine and include Python start-up.
 
 ---
 
-## CLI 指令對照表
+## CLI reference
 
-| 指令 | 用途 | 主要輸入 | 主要輸出 |
+| Command | Purpose | Main input | Main output |
 | --- | --- | --- | --- |
-| `synthesize` | 產生合成持續母音資料集 | 設定檔 | `items/item_NNN.wav`、`dataset.csv` |
-| `index` | 依評分表建立資料集索引 | 錄音資料夾、`--targets` 評分表 | `<資料夾>/dataset.csv` |
-| `prepare` | 每段錄音一個彙整後的倒頻譜向量 | `dataset.csv` | `features.npz`、`items.csv` |
-| `evaluate` | 分組或分層 k 折交叉驗證 | `features.npz` | `metrics.json`、`folds.csv`、`predictions.csv`、圖與 CSV |
-| `train` | 以全部資料訓練 | `features.npz` | `model.joblib`（`torch_mlp` 為 `model.pt`） |
-| `predict` | 以模型檔中的設定推論新錄音 | WAV 檔、`--model` | `predictions.csv` |
-| `extract` | 匯出資料夾樹中每個檔案的音框層級特徵 | 錄音資料夾 | `features/` 鏡像資料夾、`extraction.csv` |
-| `ablate` | 比較特徵設定與模型 | `dataset.csv` | `ablation_folds.csv`、`ablation_summary.csv`、`ablation_comparison.csv`、`ablation.json`、圖 |
-| `correlate` | 每欄特徵與評分的相關 | `features.npz` 或 CSV | `correlations.csv`、`feature_correlations.*` |
-| `regress` | 最小平方推論與殘差診斷 | `features.npz` 或 CSV | `coefficients.csv`、`regression_summary.json`、`vif.csv`、`regression_diagnostics.*` |
-| `stepwise` | 偏 F 檢定逐步選擇 | `features.npz` 或 CSV | `stepwise_steps.csv`、`coefficients.csv`、`regression_summary.json`、`vif.csv` |
-| `order-sweep` | 多項式階數掃描 | CSV（或 `features.npz`） | `order_sweep.csv`、`order_sweep.*` |
+| `synthesize` | Generate a synthetic sustained-vowel dataset | Configuration file | `items/item_NNN.wav`, `dataset.csv` |
+| `index` | Build the dataset index from a ratings table | Recording folder, `--targets` ratings table | `<folder>/dataset.csv` |
+| `prepare` | One pooled cepstral vector per recording | `dataset.csv` | `features.npz`, `items.csv` |
+| `evaluate` | Grouped or stratified k-fold cross-validation | `features.npz` | `metrics.json`, `folds.csv`, `predictions.csv`, figures and CSVs |
+| `train` | Train on all the data | `features.npz` | `model.joblib` (`model.pt` for `torch_mlp`) |
+| `predict` | Predict new recordings with the settings stored in the model file | WAV files, `--model` | `predictions.csv` |
+| `extract` | Export frame-level features for every file in a folder tree | Recording folder | Mirrored `features/` folder, `extraction.csv` |
+| `ablate` | Compare feature settings and models | `dataset.csv` | `ablation_folds.csv`, `ablation_summary.csv`, `ablation_comparison.csv`, `ablation.json`, figures |
+| `correlate` | Correlation of each feature column with the rating | `features.npz` or CSV | `correlations.csv`, `feature_correlations.*` |
+| `regress` | Least-squares inference and residual diagnostics | `features.npz` or CSV | `coefficients.csv`, `regression_summary.json`, `vif.csv`, `regression_diagnostics.*` |
+| `stepwise` | Stepwise selection by partial F-test | `features.npz` or CSV | `stepwise_steps.csv`, `coefficients.csv`, `regression_summary.json`, `vif.csv` |
+| `order-sweep` | Polynomial order sweep | CSV (or `features.npz`) | `order_sweep.csv`, `order_sweep.*` |
 
-| 選項 | 適用指令 | 說明 |
+| Option | Commands | Description |
 | --- | --- | --- |
-| `--log-level LEVEL` | 全域（寫在子命令之前） | `DEBUG`、`INFO`（預設）、`WARNING` 或 `ERROR`；記錄輸出到 stderr |
-| `--version` | 全域 | 顯示版本後結束 |
-| `--config/-c PATH` | `predict` 以外的指令 | YAML 設定檔；沒給時使用預設值 |
-| `--set/-s KEY=VALUE` | 同上 | 覆寫一個設定，例如 `--set model.name=svr`；可重複 |
-| `--seed INT` | `synthesize`、`evaluate`、`train`、`ablate`、`order-sweep` | 等同 `--set seed=INT` |
-| `--dataset/-d PATH` | `prepare`、`ablate` | 等同 `--set data.dataset=PATH` |
-| `--out/-o PATH` | `index` 以外會寫檔的指令 | 輸出資料夾；沒給時在 `output.root` 底下建立 `<指令>_<UTC 時間>`（`synthesize` 預設為 `data/synthetic`）。`index` 固定寫到錄音資料夾裡的 `dataset.csv` |
-| `--model/-m PATH` | `predict` | `train` 寫出的模型檔（必填） |
-| `--figures/--no-figures` | `evaluate`、`ablate`、`correlate`、`regress`、`stepwise`、`order-sweep` | 是否畫圖（圖都附同名 CSV） |
-| `--target/-t COLUMN` | `correlate`、`regress`、`stepwise`、`order-sweep` | CSV 表格的反應變數欄位（`.npz` 不需要） |
-| `--predictors/-p A,B` | `regress`、`stepwise` | 逗號分隔的預測變數，預設為所有數值欄 |
-| `--design` | `regress` | `linear` 或 `quadratic`（二階反應曲面） |
-| `--x COLUMN` | `order-sweep` | 單一預測變數欄位 |
-| `--format` | `extract` | `npz`、`htk` 或 `text` |
-| `--cache-dir PATH` | `ablate` | 靜態倒頻譜的磁碟快取 |
-| `--top N` | `correlate` | 圖中顯示的特徵數 |
-| `--targets PATH`、`--id-column` | `index` | 評分表與其識別碼欄位 |
+| `--log-level LEVEL` | Global (before the subcommand) | `DEBUG`, `INFO` (default), `WARNING` or `ERROR`; logs go to stderr |
+| `--version` | Global | Print the version and exit |
+| `--config/-c PATH` | All except `predict` | YAML configuration file; the defaults are used without it |
+| `--set/-s KEY=VALUE` | Same as above | Override one setting, for example `--set model.name=svr`; can be repeated |
+| `--seed INT` | `synthesize`, `evaluate`, `train`, `ablate`, `order-sweep` | Same as `--set seed=INT` |
+| `--dataset/-d PATH` | `prepare`, `ablate` | Same as `--set data.dataset=PATH` |
+| `--out/-o PATH` | Commands that write files, except `index` | Output folder; without it, `<command>_<UTC time>` is created under `output.root` (`synthesize` defaults to `data/synthetic`). `index` always writes `dataset.csv` inside the recording folder |
+| `--model/-m PATH` | `predict` | Model file written by `train` (required) |
+| `--figures/--no-figures` | `evaluate`, `ablate`, `correlate`, `regress`, `stepwise`, `order-sweep` | Whether to draw figures (each figure comes with a CSV of the same name) |
+| `--target/-t COLUMN` | `correlate`, `regress`, `stepwise`, `order-sweep` | Response column of a CSV table (not needed for `.npz`) |
+| `--predictors/-p A,B` | `regress`, `stepwise` | Comma-separated predictors; all numeric columns by default |
+| `--design` | `regress` | `linear` or `quadratic` (second-order response surface) |
+| `--x COLUMN` | `order-sweep` | The single predictor column |
+| `--format` | `extract` | `npz`, `htk` or `text` |
+| `--cache-dir PATH` | `ablate` | Disk cache for the static cepstra |
+| `--top N` | `correlate` | Number of features shown in the figure |
+| `--targets PATH`, `--id-column` | `index` | Ratings table and its ID column |
 
-exit code：`0` 表示成功；`2` 表示輸入或設定有誤（只印一行 `error: ...`，加上 `--log-level DEBUG` 可看到完整的 traceback）；`1` 表示被中斷或程式本身的錯誤。
+Exit codes: `0` means success; `2` means a problem with the input or the configuration (only a single `error: ...` line is printed; add `--log-level DEBUG` to see the full traceback); `1` means an interruption or a bug in the program itself.
 
 ---
 
-## 專案結構
+## Project layout
 
 ```text
 acoustic-feature-lab/
 ├── .github/
 │   ├── ISSUE_TEMPLATE/
-│   │   ├── bug_report.yml                    # 錯誤回報表單
-│   │   ├── config.yml                        # 停用空白 issue
-│   │   └── feature_request.yml               # 功能建議表單
+│   │   ├── bug_report.yml                    # bug report form
+│   │   ├── config.yml                        # disables blank issues
+│   │   └── feature_request.yml               # feature request form
 │   └── workflows/
-│       └── ci.yml                            # lint、3.10 語法閘門、Linux／Windows × Python 3.10–3.13、最舊相依版本、PyTorch
+│       └── ci.yml                            # lint, 3.10 syntax gate, Linux/Windows × Python 3.10–3.13, oldest dependencies, PyTorch
 ├── configs/
-│   ├── default.yaml                          # 與 Config() 完全相同，逐鍵附註解
-│   ├── quick_demo.yaml                       # 小型合成資料，幾秒內跑完
-│   ├── quick_classification.yaml             # 同上，二類偵測
-│   ├── classification.yaml                   # 以 label 欄做二類偵測
-│   └── compact_frontend.yaml                 # 25 ms / 10 ms、26 濾波器、對數能量
+│   ├── default.yaml                          # identical to Config(), with a comment on every key
+│   ├── quick_demo.yaml                       # small synthetic set, runs in a few seconds
+│   ├── quick_classification.yaml             # the same, as binary detection
+│   ├── classification.yaml                   # binary detection on the label column
+│   └── compact_frontend.yaml                 # 25 ms / 10 ms, 26 filters, log energy
 ├── data/
-│   └── .gitkeep                              # 資料的預設位置，內容不進版控
+│   └── .gitkeep                              # default place for data; the contents stay out of git
 ├── outputs/
-│   └── .gitkeep                              # 執行資料夾的預設根目錄，內容不進版控
+│   └── .gitkeep                              # default root for run folders; the contents stay out of git
 ├── docs/
-│   ├── images/workflow.png                   # README 的流程圖
-│   └── workflow.html                         # 互動式流程圖（瀏覽器開啟）
+│   ├── images/workflow.png                   # workflow figure in README.md
+│   ├── images/workflow.zh-TW.png             # workflow figure in README.zh-TW.md
+│   ├── workflow.html                         # interactive workflow diagram (open in a browser)
+│   └── workflow.zh-TW.html                   # the same diagram in Traditional Chinese
 ├── examples/
-│   ├── end_to_end_synthetic.py               # 完整流程
-│   ├── compare_feature_settings.py           # 特徵設定 ablation
-│   ├── compare_severity_regressors.py        # 迴歸器比較、一致性與相關
-│   ├── diagnose_regression_models.py         # 反應曲面、共線性、逐步選擇、殘差
-│   ├── select_polynomial_order.py            # 多項式階數選擇
-│   └── compare_gradient_descent_with_ols.py  # 梯度下降與閉式解
+│   ├── end_to_end_synthetic.py               # the whole pipeline
+│   ├── compare_feature_settings.py           # feature-setting ablation
+│   ├── compare_severity_regressors.py        # regressor comparison, agreement and correlation
+│   ├── diagnose_regression_models.py         # response surface, collinearity, stepwise selection, residuals
+│   ├── select_polynomial_order.py            # polynomial order selection
+│   └── compare_gradient_descent_with_ols.py  # gradient descent vs. the closed form
 ├── src/
 │   └── acoustic_feature_lab/
-│       ├── __init__.py                       # 公開 API
+│       ├── __init__.py                       # public API
 │       ├── __main__.py                       # python -m acoustic_feature_lab
-│       ├── py.typed                          # 型別資訊標記
-│       ├── cli.py                            # typer 命令列
-│       ├── config.py                         # 設定 dataclass 與 YAML 讀寫
-│       ├── errors.py                         # 例外類別
-│       ├── logging_utils.py                  # logging 設定
-│       ├── manifest.py                       # 執行資料夾與 manifest.json
-│       ├── dataset.py                        # dataset.csv、features.npz、分析用表格
-│       ├── synthetic.py                      # 合成母音與合成迴歸資料
-│       ├── corpus.py                         # 讀取錄音、批次擷取與 HTK／文字輸出
-│       ├── cepstral_frontend.py              # MFCC 前端與 Δ／ΔΔ
-│       ├── pooling.py                        # 語句層級彙整
-│       ├── pipeline.py                       # prepare／train／predict 高階 API
-│       ├── models.py                         # 估計器註冊表、降維、調參、模型檔
-│       ├── neural.py                         # PyTorch 感知器（dl extra）
-│       ├── splitting.py                      # 分組與分層的交叉驗證切分
-│       ├── evaluation.py                     # 交叉驗證與指標
-│       ├── ablation.py                       # 特徵設定網格與成對檢定
-│       ├── association.py                    # 相關、CCC、Bland–Altman、p 值校正
-│       ├── ols.py                            # 最小平方推論
-│       ├── regression_diagnostics.py         # 殘差、影響點與共線性診斷
-│       ├── design_matrix.py                  # 正交多項式與二階反應曲面
-│       ├── polynomial_order.py               # 多項式階數掃描
-│       ├── stepwise.py                       # 逐步選擇
-│       ├── gradient_descent.py               # 梯度下降
-│       ├── reference_data.py                 # 公開的水泥硬化熱資料
-│       └── figures.py                        # 圖與同內容的表格
-├── tests/                                    # 多數模組各有一個 test_<module>.py，另有範例、3.10 相容性與文件檢查
+│       ├── py.typed                          # marker for type information
+│       ├── cli.py                            # typer command line
+│       ├── config.py                         # configuration dataclasses and YAML I/O
+│       ├── errors.py                         # exception classes
+│       ├── logging_utils.py                  # logging setup
+│       ├── manifest.py                       # run folders and manifest.json
+│       ├── dataset.py                        # dataset.csv, features.npz, tables for analysis
+│       ├── synthetic.py                      # synthetic vowels and synthetic regression data
+│       ├── corpus.py                         # loading recordings, batch extraction, HTK/text output
+│       ├── cepstral_frontend.py              # MFCC front end and Δ/ΔΔ
+│       ├── pooling.py                        # utterance-level pooling
+│       ├── pipeline.py                       # prepare/train/predict high-level API
+│       ├── models.py                         # estimator registry, reduction, tuning, model files
+│       ├── neural.py                         # PyTorch perceptron (dl extra)
+│       ├── splitting.py                      # grouped and stratified cross-validation splits
+│       ├── evaluation.py                     # cross-validation and metrics
+│       ├── ablation.py                       # feature-setting grid and paired tests
+│       ├── association.py                    # correlation, CCC, Bland–Altman, p-value correction
+│       ├── ols.py                            # least-squares inference
+│       ├── regression_diagnostics.py         # residual, influence and collinearity diagnostics
+│       ├── design_matrix.py                  # orthogonal polynomials and second-order response surface
+│       ├── polynomial_order.py               # polynomial order sweep
+│       ├── stepwise.py                       # stepwise selection
+│       ├── gradient_descent.py               # gradient descent
+│       ├── reference_data.py                 # public cement heat-of-hardening data
+│       └── figures.py                        # figures and tables with the same data
+├── tests/                                    # a test_<module>.py for most modules, plus examples, 3.10 compatibility and documentation checks
 ├── .gitattributes
 ├── .gitignore
 ├── CHANGELOG.md
@@ -459,23 +463,24 @@ acoustic-feature-lab/
 ├── CONTRIBUTING.md
 ├── LICENSE
 ├── README.md
+├── README.zh-TW.md
 └── pyproject.toml
 ```
 
 ---
 
-## 資料準備
+## Preparing data
 
-**本專案不附任何資料。** 請自行準備錄音與評分，放在任意資料夾（預設的 `data/` 不會進版控），再以資料集索引描述它們。
+**No data comes with this project.** Prepare your own recordings and ratings, put them in any folder (the default `data/` is kept out of git), and describe them with a dataset index.
 
-### 1. 資料集索引 dataset.csv
+### 1. The dataset index, dataset.csv
 
-| 欄位 | 必要 | 說明 |
+| Column | Required | Description |
 | --- | --- | --- |
-| `path` | 是 | 錄音檔路徑，相對於 `dataset.csv` 所在的資料夾，使用 `/` 分隔 |
-| `severity`（或 `data.target` 指定的欄名） | 是 | 迴歸任務的數值評分，例如 CAPE-V 0–100 或 GRBAS 的 G 0–3 |
-| `label` | 分類任務才需要 | 類別名稱（字串），搭配 `data.task: classification` 與 `data.target: label` |
-| `group` | 否 | 受試者或錄音場次；同一組的錄音不會同時出現在訓練與測試折 |
+| `path` | Yes | Path to the recording, relative to the folder that holds `dataset.csv`, with `/` as the separator |
+| `severity` (or the column named by `data.target`) | Yes | Numeric rating for regression, for example CAPE-V 0–100 or the GRBAS G score 0–3 |
+| `label` | Only for classification | Class name (a string), used with `data.task: classification` and `data.target: label` |
+| `group` | No | Speaker or recording session; recordings of one group never appear in a training fold and a test fold at the same time |
 
 ```csv
 path,severity,label,group
@@ -484,42 +489,42 @@ visit1/p001_i.wav,15.0,healthy,p001
 visit1/p002_a.wav,68.0,dysphonic,p002
 ```
 
-標籤與分組只從欄位讀取，程式不會去解析檔名。若評分放在另一張表（欄位 `id, severity, group`），可用 `acoustic-feature-lab index <錄音資料夾> --targets <評分表>` 依檔名主幹或相對路徑配對，自動寫出 `<錄音資料夾>/dataset.csv`；找不到檔案、識別碼重複、一個識別碼對到多個檔案，或兩個識別碼對到同一個檔案（例如 `p001` 以主幹、`sub/p001` 以相對路徑配到同一段錄音）都會報錯。`dataset.csv` 裡同一個檔案出現兩次也會報錯，因為同一段錄音可能因此同時落在訓練折與測試折。
+Labels and groups are read only from columns; file names are never parsed. If the ratings are in a separate table (columns `id, severity, group`), `acoustic-feature-lab index <recording folder> --targets <ratings table>` matches them to the files by file stem or relative path and writes `<recording folder>/dataset.csv`. A missing file, a duplicate ID, an ID that matches several files, or two IDs that match the same file (for example `p001` by stem and `sub/p001` by relative path, both reaching the same recording) is an error. So is a file listed twice in `dataset.csv`, because that recording could then land in a training fold and a test fold at the same time.
 
-### 2. 檔案格式
+### 2. File formats
 
-- 錄音：WAV（8／16／32 位元 PCM 或浮點），多聲道會平均成單聲道並轉成 $[-1, 1]$ 的 float64。
-- 取樣率：不限，框長、位移與梅爾濾波器都依每個檔案的實際取樣率計算；資料集混用多種取樣率時會記錄警告，建議以 `audio.sample_rate` 統一重新取樣（多相濾波）。
-- 長度與內容：至少要有一個分析框。比一框還短、讀不到，或含有 NaN／無限大樣本（浮點 WAV 可能出現）的檔案，`prepare` 會列出問題檔案的總數與前五個檔名後中止；`extract` 則在 `extraction.csv` 標記為 `too_short` 或 `error`，再繼續處理其他檔案。
-- 修剪：`audio.trim_s` 從頭尾各切掉固定秒數，`audio.trim_silence` 以端點偵測去除前後靜音，兩者預設都關閉。
+- Recordings: WAV (8/16/32-bit PCM or floating point). Multichannel audio is averaged to mono and converted to float64 in $[-1, 1]$.
+- Sample rate: any. Frame length, hop and mel filters are all computed at each file's actual sample rate. A dataset that mixes sample rates logs a warning; I recommend resampling everything to one rate with `audio.sample_rate` (polyphase filtering).
+- Length and content: at least one analysis frame. For files that are shorter than one frame, cannot be read, or contain NaN/infinite samples (which can happen in floating-point WAV), `prepare` reports the number of problem files and the first five names, then stops; `extract` marks them `too_short` or `error` in `extraction.csv` and goes on with the other files.
+- Trimming: `audio.trim_s` cuts a fixed number of seconds from each end, and `audio.trim_silence` removes leading and trailing silence by endpoint detection. Both are off by default.
 
-### 3. 公開的範例資料
+### 3. Public reference data
 
-`reference_data.py` 內附 13 筆波特蘭水泥硬化熱資料（Woods et al., 1932；Hald, 1952）：四種熟料成分的百分比與硬化時的放熱量。這是逐步迴歸與多重共線性的經典範例，用在 `examples/diagnose_regression_models.py`、doctest 與 `tests/test_reference_data.py`（核對教科書上的迴歸結果）；其他測試都使用合成資料。
+`reference_data.py` includes the 13 observations of the Portland cement heat-of-hardening data (Woods et al., 1932; Hald, 1952): the percentages of four clinker components and the heat given off while the cement hardens. It is the classic example for stepwise regression and multicollinearity, used in `examples/diagnose_regression_models.py`, in doctests and in `tests/test_reference_data.py` (which checks the regression results given in textbooks). All the other tests use synthetic data.
 
 ---
 
-## 設定檔
+## Configuration
 
-`configs/default.yaml` 與 `Config()` 完全相同，每個鍵都附英文註解，可當成撰寫自己設定檔的對照；`configs/quick_demo.yaml` 只列與預設不同的鍵，把合成資料縮小到 8 位受試者、24 段 0.5 秒的錄音，用於「快速開始」、範例的 `--quick` 與 CI。`configs/quick_classification.yaml` 是同樣規模的二類偵測，`configs/classification.yaml` 把任何設定切換成以 `label` 欄做二類偵測，`configs/compact_frontend.yaml` 示範另一組常見的 MFCC 參數。沒有給 `--config` 時程式使用 `Config()`，不會自動讀取任何檔案。
+`configs/default.yaml` is identical to `Config()` and has a comment on every key, so it can serve as a reference when you write your own configuration. `configs/quick_demo.yaml` lists only the keys that differ from the defaults and shrinks the synthetic data to 8 speakers and 24 recordings of 0.5 s; the quick start, the examples' `--quick` and CI use it. `configs/quick_classification.yaml` is binary detection at the same size, `configs/classification.yaml` switches any configuration to binary detection on the `label` column, and `configs/compact_frontend.yaml` shows another common set of MFCC parameters. Without `--config`, the CLI uses `Config()` and does not read any file on its own.
 
-| 區段 | 重要欄位 | 說明 |
+| Section | Main keys | Description |
 | --- | --- | --- |
-| （頂層） | `seed` | 主種子 |
-| `data` | `dataset`、`task`、`target` | 資料集索引、任務與目標欄位 |
-| `synthetic` | `n_speakers`、`jitter_range`、`hnr_range_db` | 合成資料的規模與生成參數 |
-| `audio` | `sample_rate`、`trim_s`、`trim_silence` | 讀取錄音時的重新取樣與修剪 |
-| `frontend` | `frame_ms`、`n_mels`、`n_ceps`、`energy_term`、`delta_order` | 倒頻譜前端 |
-| `pooling` | `statistics`、`normalization` | 語句層級彙整 |
-| `analysis` | `ci_level`、`correction`、`p_enter`、`max_degree` | 統計推論、逐步選擇與階數掃描 |
-| `ablation` | `n_ceps`、`delta_order`、`models`、`n_repeats` | ablation 網格 |
-| `model` | `name`、`reducer`、`tune` | 估計器與超參數 |
-| `evaluation` | `n_splits`、`positive_class` | 交叉驗證 |
-| `output` | `root`、`figure_format`、`dpi` | 輸出位置與圖檔格式 |
+| (top level) | `seed` | Master seed |
+| `data` | `dataset`, `task`, `target` | Dataset index, task and target column |
+| `synthetic` | `n_speakers`, `jitter_range`, `hnr_range_db` | Size and generation parameters of the synthetic data |
+| `audio` | `sample_rate`, `trim_s`, `trim_silence` | Resampling and trimming when recordings are loaded |
+| `frontend` | `frame_ms`, `n_mels`, `n_ceps`, `energy_term`, `delta_order` | Cepstral front end |
+| `pooling` | `statistics`, `normalization` | Utterance-level pooling |
+| `analysis` | `ci_level`, `correction`, `p_enter`, `max_degree` | Statistical inference, stepwise selection and the order sweep |
+| `ablation` | `n_ceps`, `delta_order`, `models`, `n_repeats` | Ablation grid |
+| `model` | `name`, `reducer`, `tune` | Estimator and hyperparameters |
+| `evaluation` | `n_splits`, `positive_class` | Cross-validation |
+| `output` | `root`, `figure_format`, `dpi` | Output location and figure format |
 
-`audio`、`frontend`、`pooling` 三個區段以及 `data.task`、`data.target` 決定了 `features.npz` 的內容；`evaluate` 與 `train` 讀特徵檔時若發現這些設定與 `prepare` 不同，會直接報錯。`predict` 只使用模型檔裡保存的設定，所以沒有 `--config`。
+The `audio`, `frontend` and `pooling` sections, together with `data.task` and `data.target`, determine what goes into `features.npz`. If `evaluate` or `train` finds that these settings differ from the ones `prepare` used, it stops with an error. `predict` uses only the settings stored in the model file, which is why it has no `--config`.
 
-未知的鍵會直接報錯，並列出合法的鍵，例如：
+An unknown key is an error, and the message lists the valid keys, for example:
 
 ```text
 $ acoustic-feature-lab prepare --set frontend.n_cepz=3
@@ -528,44 +533,44 @@ error: unknown configuration key 'frontend.n_cepz'; valid keys here are ['delta_
 
 ---
 
-## 結果與評估指標
+## Results and metrics
 
-一次 `evaluate`（迴歸任務）寫出的執行資料夾：
+The run folder from a single `evaluate` run on a regression task:
 
 ```text
 outputs/demo/evaluate/
-├── config.yaml          # 實際使用的完整設定
-├── manifest.json        # 指令、時間、版本、git commit、種子、輸入檔 SHA-256
-├── metrics.json         # 各折、平均 ± 標準差與 pooled 指標
-├── folds.csv            # 每折一列
-├── predictions.csv      # 每段錄音一列的 out-of-fold 預測
-├── residuals.png        # 預測對實際、殘差對預測
+├── config.yaml          # the full configuration actually used
+├── manifest.json        # command, time, versions, git commit, seed, SHA-256 of the input files
+├── metrics.json         # per-fold, mean ± std and pooled metrics
+├── folds.csv            # one row per fold
+├── predictions.csv      # one out-of-fold prediction per recording
+├── residuals.png        # predicted against actual, residuals against predicted
 ├── residuals.csv
-├── bland_altman.png     # 一致性分析
+├── bland_altman.png     # agreement analysis
 └── bland_altman.csv
 ```
 
-| 檔案 | 內容 |
+| File | Contents |
 | --- | --- |
-| `metrics.json` | `task`、`n_items`、`n_splits`、`seed`、`folds`、`summary`（每個指標的 `mean` 與 `std`）、`pooled`（迴歸另含 `bland_altman`；分類另含 `classes`、`confusion_matrix`、`per_class`） |
-| `folds.csv` | `fold`、`n_train`、`n_test` 與各指標 |
-| `predictions.csv` | `path`、`group`、`fold`、目標欄、`predicted`，分類再加每類的 `score_<類別>` |
-| `residuals.*`、`bland_altman.*` | 迴歸任務的圖與同內容表格 |
-| `confusion_matrix.*`、`roc_curve.*` | 分類任務的圖與同內容表格（ROC 只在二類時輸出） |
+| `metrics.json` | `task`, `n_items`, `n_splits`, `seed`, `folds`, `summary` (`mean` and `std` of each metric), `pooled` (with `bland_altman` added for regression; `classes`, `confusion_matrix` and `per_class` for classification) |
+| `folds.csv` | `fold`, `n_train`, `n_test` and every metric |
+| `predictions.csv` | `path`, `group`, `fold`, the target column, `predicted`, plus a `score_<class>` per class for classification |
+| `residuals.*`, `bland_altman.*` | Figures for regression tasks, with tables of the same data |
+| `confusion_matrix.*`, `roc_curve.*` | Figures for classification tasks, with tables of the same data (ROC only for two classes) |
 
-| 指標 | 定義 | 為什麼看它 |
+| Metric | Definition | Why look at it |
 | --- | --- | --- |
-| MAE | $\frac1n\sum \lvert \hat y_i - y_i\rvert$ | 以評分單位表示的平均誤差，容易向臨床人員解釋 |
-| RMSE | $\sqrt{\frac1n\sum(\hat y_i - y_i)^2}$ | 對大誤差較敏感；ablation 預設以它排名 |
-| $R^2$ | $1 - \text{SSE}/\text{SST}$（每折以該折的平均為基準） | 解釋了多少變異；小折的值波動很大 |
-| Pearson $r$／Spearman $\rho$ | 線性與等級相關 | 預測與評分是否同方向變動 |
-| CCC | $2s_{xy}/(s_x^2 + s_y^2 + (\bar x - \bar y)^2)$ | 預測是否**等於**評分，同時懲罰偏差與散布 |
-| Bland–Altman | 平均差與 $\pm 1.96\,s_d$ 一致性界限 | 系統性偏差與個別誤差的範圍 |
-| UAR | 各類召回率的平均（以 `speechdsp.uar` 計算，只對真實出現的類別取平均，與 balanced accuracy 相同） | 類別不平衡時不會被多數類灌水 |
-| 敏感度／特異度 | 陽性類與陰性類的召回率 | 篩檢情境下兩種錯誤的代價不同 |
-| ROC-AUC | 陽性分數的排序品質 | 不依賴單一決策門檻 |
+| MAE | $\frac1n\sum \lvert \hat y_i - y_i\rvert$ | Average error in rating units, easy to explain to clinicians |
+| RMSE | $\sqrt{\frac1n\sum(\hat y_i - y_i)^2}$ | More sensitive to large errors; the ablation ranks by it by default |
+| $R^2$ | $1 - \text{SSE}/\text{SST}$ (each fold against that fold's mean) | How much of the variance is explained; swings widely on small folds |
+| Pearson $r$/Spearman $\rho$ | Linear and rank correlation | Whether predictions and ratings move in the same direction |
+| CCC | $2s_{xy}/(s_x^2 + s_y^2 + (\bar x - \bar y)^2)$ | Whether the predictions **equal** the ratings, penalizing bias and scatter together |
+| Bland–Altman | Mean difference and $\pm 1.96\,s_d$ limits of agreement | Systematic bias and the range of individual errors |
+| UAR | Mean of the per-class recalls (computed with `speechdsp.uar`, averaged only over the classes that actually occur in the truth; the same as balanced accuracy) | Not inflated by the majority class when the classes are unbalanced |
+| Sensitivity/specificity | Recall of the positive class and of the negative class | In screening, the two kinds of error have different costs |
+| ROC-AUC | How well the positive scores are ranked | Does not depend on a single decision threshold |
 
-### 迴歸：快速開始的結果
+### Regression: the quick-start run
 
 ```bash
 acoustic-feature-lab synthesize --config configs/quick_demo.yaml --out data/synthetic
@@ -573,9 +578,9 @@ acoustic-feature-lab prepare --config configs/quick_demo.yaml --out outputs/demo
 acoustic-feature-lab evaluate outputs/demo/prepare/features.npz --config configs/quick_demo.yaml --out outputs/demo/evaluate
 ```
 
-24 段錄音、8 位受試者、39 維音框特徵 × 平均與標準差（78 欄）、Ridge、4 折分組交叉驗證：
+24 recordings, 8 speakers, 39-dimensional frame features × mean and standard deviation (78 columns), Ridge, 4-fold grouped cross-validation:
 
-| 指標 | 各折 mean ± std | pooled |
+| Metric | Per-fold mean ± std | Pooled |
 | --- | --- | --- |
 | MAE | 9.563 ± 1.769 | 9.563 |
 | RMSE | 13.027 ± 3.141 | 13.308 |
@@ -584,136 +589,136 @@ acoustic-feature-lab evaluate outputs/demo/prepare/features.npz --config configs
 | Spearman $\rho$ | 0.829 ± 0.168 | 0.907 |
 | CCC | 0.835 ± 0.166 | 0.909 |
 
-pooled 的 Bland–Altman 平均差為 1.547，95 % 一致性界限為 −24.915 至 28.010。各折 $R^2$ 的標準差很大，是因為每折只有 6 段錄音、折內評分的變異又各不相同，這也是為什麼要同時看 pooled 指標與 CCC。
+The pooled Bland–Altman mean difference is 1.547, with 95% limits of agreement from −24.915 to 28.010. The per-fold $R^2$ has a large standard deviation because each fold holds only 6 recordings and the spread of the ratings differs from fold to fold, so read it together with the pooled metrics and CCC.
 
-### 分類：二類偵測
+### Classification: binary detection
 
 ```bash
 acoustic-feature-lab prepare --config configs/quick_classification.yaml --out outputs/demo/prepare_cls
 acoustic-feature-lab evaluate outputs/demo/prepare_cls/features.npz --config configs/quick_classification.yaml --out outputs/demo/evaluate_cls
 ```
 
-同一批合成錄音、以 `label` 欄（嚴重度 ≥ 35 為 `dysphonic`）做 Logistic 迴歸：
+The same synthetic recordings, with logistic regression on the `label` column (`dysphonic` at severity ≥ 35):
 
-| 指標 | 各折 mean ± std | pooled |
+| Metric | Per-fold mean ± std | Pooled |
 | --- | --- | --- |
 | UAR | 0.917 ± 0.096 | 0.889 |
-| 準確率 | 0.917 ± 0.096 | 0.917 |
+| Accuracy | 0.917 ± 0.096 | 0.917 |
 | macro F1 | 0.914 ± 0.099 | 0.906 |
-| 敏感度（`dysphonic`） | 1.000 ± 0.000 | 1.000 |
-| 特異度 | 0.778 ± 0.192 | 0.778 |
+| Sensitivity (`dysphonic`) | 1.000 ± 0.000 | 1.000 |
+| Specificity | 0.778 ± 0.192 | 0.778 |
 | ROC-AUC | 1.000 ± 0.000 | 0.985 |
 
-只有 8 位受試者時，分組分層切分無法讓每一折都同時含有兩類：第 0 折的 6 段錄音全是 `dysphonic`，敏感度照算（6 段全對，為 1），但沒有 `healthy` 可算特異度，ROC-AUC 也沒有定義。這兩項記為 NaN 並不列入平均（程式會記錄警告），所以它們的 mean ± std 只來自 3 折。pooled 混淆矩陣（列為真實類別、欄為預測類別）：
+With only 8 speakers, stratified group splitting cannot give every fold both classes. All 6 recordings of fold 0 are `dysphonic`: sensitivity can still be computed (all 6 correct, so 1), but there is no `healthy` recording for specificity, and ROC-AUC is undefined. Those two are recorded as NaN and left out of the mean (a warning is logged), so their mean ± std comes from 3 folds only. The pooled confusion matrix (rows are true classes, columns predicted classes):
 
-| 真實＼預測 | `dysphonic` | `healthy` |
+| True \ predicted | `dysphonic` | `healthy` |
 | --- | --- | --- |
 | `dysphonic` | 15 | 0 |
 | `healthy` | 2 | 7 |
 
-### 特徵設定的 ablation
+### Feature-setting ablation
 
-快速設定（`delta_order` ∈ {0, 2}、Ridge、4 折 × 2 次重複）：
+The quick configuration (`delta_order` ∈ {0, 2}, Ridge, 4 folds × 2 repeats):
 
 ```bash
 acoustic-feature-lab ablate --config configs/quick_demo.yaml --out outputs/demo/ablate
 ```
 
-| 設定 | 特徵維度 | RMSE mean ± std | CCC mean ± std |
+| Setting | Feature dimensions | RMSE mean ± std | CCC mean ± std |
 | --- | --- | --- | --- |
-| `delta_order=0`（基準，13 維音框特徵） | 26 | 14.009 ± 4.670 | 0.531 ± 0.413 |
-| `delta_order=2`（39 維音框特徵） | 78 | 16.212 ± 2.972 | 0.437 ± 0.453 |
+| `delta_order=0` (baseline, 13-dimensional frame features) | 26 | 14.009 ± 4.670 | 0.531 ± 0.413 |
+| `delta_order=2` (39-dimensional frame features) | 78 | 16.212 ± 2.972 | 0.437 ± 0.453 |
 
-39 維對 13 維的 RMSE 平均差 +2.204，修正 t 檢定 p = 0.547、Wilcoxon p = 0.188（只有一個比較，Holm 校正後不變）：24 段錄音不足以分辨兩者。
+For 39 versus 13 dimensions, the mean RMSE difference is +2.204, with corrected t-test p = 0.547 and Wilcoxon p = 0.188 (a single comparison, so Holm correction leaves them unchanged): 24 recordings are not enough to tell the two apart.
 
-預設設定（60 段 1 秒錄音、20 位受試者、`n_ceps` ∈ {12, 6, 18} × `delta_order` ∈ {0, 1, 2} × {Ridge, SVR}、5 折 × 3 次重複，共 18 組）：
+The default configuration (60 recordings of 1 s, 20 speakers, `n_ceps` ∈ {12, 6, 18} × `delta_order` ∈ {0, 1, 2} × {Ridge, SVR}, 5 folds × 3 repeats, 18 settings in all):
 
 ```bash
 acoustic-feature-lab synthesize --out data/synthetic_full
 acoustic-feature-lab ablate --dataset data/synthetic_full/dataset.csv --out outputs/demo/ablate_full
 ```
 
-RMSE（mean ± std，15 個折）：
+RMSE (mean ± std over 15 folds):
 
-| 模型 | `n_ceps` | 靜態（13 維音框特徵為 12 + c0） | + Δ | + Δ + ΔΔ |
+| Model | `n_ceps` | Static (13-dimensional frame features are 12 + c0) | + Δ | + Δ + ΔΔ |
 | --- | --- | --- | --- | --- |
 | Ridge | 6 | 13.056 ± 1.836 | 14.575 ± 2.004 | 16.547 ± 2.583 |
-| Ridge | 12 | 8.624 ± 1.799（基準） | 11.994 ± 2.143 | 13.431 ± 2.524 |
+| Ridge | 12 | 8.624 ± 1.799 (baseline) | 11.994 ± 2.143 | 13.431 ± 2.524 |
 | Ridge | 18 | **7.463 ± 1.818** | 11.416 ± 2.798 | 12.155 ± 2.953 |
 | SVR | 6 | 13.217 ± 4.143 | 15.447 ± 5.225 | 18.594 ± 5.551 |
 | SVR | 12 | 11.501 ± 3.613 | 15.826 ± 4.114 | 18.421 ± 4.060 |
 | SVR | 18 | 10.367 ± 3.536 | 14.430 ± 3.239 | 16.113 ± 3.211 |
 
-排名第一的 `n_ceps=18|delta_order=0|model=ridge`（38 欄）比基準低 1.162，CCC 為 0.920 ± 0.080；但修正 t 檢定經 Holm 校正後 p = 0.171，Wilcoxon 校正後卻是 p = 0.003。兩者的落差正是 Nadeau–Bengio 修正的用意：各折的訓練集大量重疊，把 15 個折當成獨立樣本的檢定會過度自信。修正 t 檢定校正後仍顯著（p < 0.05）的有 8 組，全都比基準**差**，而且都加了 Δ：Ridge 的 `n_ceps=6` 加 Δ（p < 0.001）與加 Δ、ΔΔ（p = 0.001）、`n_ceps=12` 加 Δ、ΔΔ（p = 0.044），SVR 的 `n_ceps=6` 加 Δ、ΔΔ（p = 0.044）、`n_ceps=12` 加 Δ（p = 0.012）與加 Δ、ΔΔ（p = 0.001）、`n_ceps=18` 加 Δ（p = 0.006）與加 Δ、ΔΔ（p = 0.001）。在這個合成資料上，持續母音幾乎沒有時間上的動態變化，Δ 與 ΔΔ 只增加維度而沒有增加資訊；48 段訓練錄音面對 78 或 114 欄特徵時，誤差隨之上升。這個結果只說明框架找得出差異、也檢定得了，不能當成真實嗓音的結論。
+The top-ranked `n_ceps=18|delta_order=0|model=ridge` (38 columns) is 1.162 below the baseline, with CCC 0.920 ± 0.080. After Holm correction, though, the corrected t-test gives p = 0.171 while Wilcoxon gives p = 0.003. That gap is exactly what the Nadeau–Bengio correction is for: the training sets of the folds overlap heavily, and a test that treats the 15 folds as independent samples is overconfident. Under the corrected t-test, 8 settings stay significant (p < 0.05) after correction, all of them **worse** than the baseline and all with Δ added: for Ridge, `n_ceps=6` with Δ (p < 0.001) and with Δ and ΔΔ (p = 0.001), and `n_ceps=12` with Δ and ΔΔ (p = 0.044); for SVR, `n_ceps=6` with Δ and ΔΔ (p = 0.044), `n_ceps=12` with Δ (p = 0.012) and with Δ and ΔΔ (p = 0.001), and `n_ceps=18` with Δ (p = 0.006) and with Δ and ΔΔ (p = 0.001). In this synthetic data a sustained vowel barely changes over time, so Δ and ΔΔ add dimensions without adding information, and with 48 training recordings for 78 or 114 feature columns the error goes up. The result only shows that the framework can find a difference and test it; it is not a conclusion about real voices.
 
 ---
 
-## 已知限制
+## Known limitations
 
-- 合成資料不代表真實表現。合成母音的嚴重度只透過 jitter、shimmer 與雜訊表現，比真實病理嗓音單純得多，本文件的所有數字都只用來證明軟體能正確運作。
-- 這是研究用的程式，沒有在臨床資料上驗證過，不能用於診斷。
-- 模型檔只能載入自己信任的來源：`model.joblib` 以 joblib（pickle）儲存，`model.pt` 也包含 pickle 格式的設定，載入不明來源的檔案可能執行任意程式碼。
-- 只處理持續母音。前端與彙整統計量是為持續母音設計的；連續語句的嚴重度通常還需要有聲段偵測與韻律特徵，這裡沒有提供。
-- 受試者只有數十位時，各折分數的變異很大，修正 t 檢定經多重比較校正後常常不顯著；「沒有顯著差異」應解讀為「資料不足以分辨」，而不是「兩者相同」。
-- `stepwise` 報告的 p 值與 $R^2$ 是選擇後的樣本內數字，會高估模型的表現；真正的表現請以 `evaluate` 的交叉驗證衡量。
-- 受試者很少時，分層分組切分可能產生只含一類的測試折。這種折只算得出那一類的召回率：只有陽性時特異度記為 NaN，只有陰性時敏感度記為 NaN，ROC-AUC 一律記為 NaN；該折的 UAR 只對該折真實出現的類別取平均，macro F1 則對「真實或被預測到」的類別取平均，兩者在這種折上會不一致。請優先參考 pooled 指標，或增加受試者、減少折數。
-
----
-
-## 設計重點
-
-### 特徵擷取
-
-- 框長、濾波器、倒頻譜數、能量項、Δ 階數、提升與彙整方式都是設定鍵，13／26／39 維就是 `frontend.delta_order` 的 0、1、2。`ablate` 一次比較整個網格，結果連同設定一起寫出。
-- 框長與位移用毫秒設定，依每個檔案的取樣率換算。如果寫死成某個取樣率下的點數，其他取樣率的檔案會拿到錯的框長與梅爾對應，而且不會有任何錯誤訊息；需要統一時再用 `audio.sample_rate` 重新取樣。
-- 頭尾修剪也以秒為單位（`audio.trim_s`），因為同樣的樣本數在不同取樣率下代表不同的長度。
-- 濾波器能量取對數前有可設定的下限，全零的框不會變成 $-\infty$。
-- 一段錄音的所有框排成一個矩陣，一次做完 FFT，梅爾濾波也只是一次矩陣乘法。
-- HTK 檔以大端序、100 ns 為單位寫出，`parmKind` 依實際版面計算（例如 39 維 `c0` 版面為 8966），其他讀 HTK 格式的工具可以直接使用；另有 npz 與文字格式。
-- `extract` 只處理 `.wav`（副檔名不分大小寫），依相對路徑排序，同一個資料夾每次都以相同順序處理。每個檔案都在 `extraction.csv` 留一筆狀態與錯誤訊息，太短或讀不到的檔案也查得到。
-
-### 評估
-
-- 標準化、降維與調參都包在 `Pipeline` 裡，只在訓練折擬合，需要時以內層交叉驗證調參。挑模型、決定何時停止訓練、學 LDA 投影都不碰測試折，否則成績會過度樂觀。
-- 預設 5 折，依 `group` 欄分組、分類時再分層。切分只取決於目標、群組與種子，同一個種子在不同的 NumPy 版本上也得到相同的折。
-- 分類以 UAR 為主要指標，另有敏感度、特異度、macro F1、ROC-AUC 與混淆矩陣；只看準確率會被多數類灌水。
-- 讀 `dataset.csv` 時，目標欄只要有空白，或迴歸任務裡有不是數字的值，就直接報錯並列出是哪幾列，不會略過那幾列繼續算。
-- 每個設定都以修正的重抽樣 t 檢定與 Wilcoxon 檢定和基準比較，並做多重比較校正。
-- 預測與臨床評分是否一致，看的是 CCC 與 Bland–Altman，不只看相關。
-
-### 迴歸分析
-
-- 最小平方擬合輸出係數的標準誤、t、p、信賴區間、調整後 $R^2$、AIC、BIC、條件數，以及常態性、異質變異數、自我相關、leverage、Cook's distance 與 VIF。t、F 與信賴區間要在殘差常態、等變異、彼此獨立時才成立，所以診斷和係數表一起輸出。
-- 殘差自由度為 0 時（例如以 7 個點擬合 7 個參數），$R^2 = 1$ 與 F、p 都沒有意義，所以輸出 NaN 並標記為不可估計；參數多於觀測或欄位共線時直接報錯。
-- 預設使用正交多項式與中心化的反應曲面，避免高次項與交互作用項讓設計矩陣接近奇異。
-- 多項式階數掃描把樣本內指標與 LOOCV、k 折 RMSE、AIC、BIC 並列，依設定的準則推薦階數；過度擬合的程度由樣本外誤差來看。
-- 逐步選擇記錄每一步的動作與統計量並附上 VIF，看得出共線性怎麼影響選擇（水泥資料從空模型與全模型出發會選到不同的變數）。
-- 梯度下降先標準化變數，以向量化的同步更新、成本的相對變化與迭代上限控制收斂並偵測發散，結果與閉式解比對到 $10^{-6}$。
-
-### 工程
-
-相依套件的版本下限挑的是 Python 3.10 裝得起來的版本；CI 在 Linux 與 Windows 上跑 3.10–3.13，另有一個 job 裝最舊的相依版本跑同一套測試。
-
-預設的 ablation 是 18 組設定、各 15 個折，一次就要擬合 270 個模型，每個結果都得對得回當時的設定。所以設定全放在 frozen dataclass、以 YAML 讀寫，鍵打錯就報錯，資料與輸出的位置也只從設定鍵或命令列選項來；除了只寫 `dataset.csv` 的 `index`，每個指令都在輸出資料夾留下 `config.yaml` 與 `manifest.json`，每張圖旁邊也放一份同內容的 CSV，要核對數字或換工具重畫都不必重跑。CLI 碰到輸入或設定的錯誤只印一行，以 exit code 2 結束；進度與警告走 logging，輸出到 stderr。
-
-程式碼風格（type hints、英文 numpy 風格 docstring、ruff）的約定寫在 CONTRIBUTING.md。測試只用合成資料和內附的公開水泥資料；六支 examples 由 `tests/test_examples.py` 以 `--quick` 實際跑過，API 改壞了，範例會先在測試裡失敗。
-
-預強調、分框、梅爾濾波器組、Δ、CMN／CMVN、端點偵測、HTK 與 WAV 讀寫、UAR 來自 `speechdsp`；窗函數、功率譜、DCT 縮放與能量項的組合留在專案內，理由見「方法說明」第 1 節。
+- Synthetic data does not represent real performance. Severity in the synthetic vowels shows up only through jitter, shimmer and noise, which is far simpler than a real pathological voice; every number in this README is there only to show that the software works correctly.
+- This is research code. It has not been validated on clinical data and must not be used for diagnosis.
+- Load model files only from sources you trust: `model.joblib` is saved with joblib (pickle), and `model.pt` also holds its settings in pickle format, so loading a file of unknown origin can execute arbitrary code.
+- Sustained vowels only. The front end and the pooling statistics are designed for sustained vowels; severity in connected speech usually also needs voiced-segment detection and prosodic features, which are not provided here.
+- With only a few dozen speakers the fold scores vary a lot, and after multiple-comparison correction the corrected t-test is often not significant. Read "no significant difference" as "not enough data to tell them apart", not as "the two are the same".
+- The p-values and $R^2$ reported by `stepwise` are in-sample numbers after selection and overstate how good the model is; measure its real performance with the cross-validation in `evaluate`.
+- With very few speakers, stratified group splitting can produce a test fold that contains only one class. Such a fold yields the recall of that class only: specificity is NaN when the fold holds only positives, sensitivity is NaN when it holds only negatives, and ROC-AUC is always NaN. The fold's UAR averages over the classes actually present in that fold, while macro F1 averages over the classes that are either present or predicted, so the two disagree on such a fold. Look at the pooled metrics first, or add speakers, or use fewer folds.
 
 ---
 
-## 開發與測試
+## Design notes
+
+### Feature extraction
+
+- Frame length, filters, number of cepstra, energy term, Δ order, liftering and pooling are all configuration keys, and 13/26/39 dimensions are just `frontend.delta_order` 0, 1 and 2. `ablate` compares the whole grid in one run and writes the results together with the settings.
+- Frame length and hop are set in milliseconds and converted at each file's sample rate. Hard-coding them as sample counts at one rate would give files at other rates the wrong frame length and the wrong mel mapping, without any error message; when a common rate is needed, resample with `audio.sample_rate`.
+- Head and tail trimming is also in seconds (`audio.trim_s`), because the same number of samples is a different length at a different sample rate.
+- The filter energies have a configurable floor before the log, so an all-zero frame does not turn into $-\infty$.
+- All frames of a recording are stacked into one matrix and go through the FFT in a single call, and mel filtering is a single matrix product.
+- HTK files are written big-endian, with the frame period in 100 ns units and `parmKind` computed from the actual layout (8966 for the 39-dimensional `c0` layout, for example), so other tools that read the HTK format can use them directly; npz and text formats are available as well.
+- `extract` handles only `.wav` (the extension is case-insensitive) and sorts by relative path, so the same folder is always processed in the same order. Every file leaves a row in `extraction.csv` with its status and error message, so files that were too short or could not be read can still be found.
+
+### Evaluation
+
+- Scaling, reduction and tuning are all inside the `Pipeline` and are fitted on the training folds only, with an inner cross-validation for tuning when needed. Choosing the model, deciding when to stop training and learning the LDA projection never touch the test fold; otherwise the scores would be too optimistic.
+- 5 folds by default, grouped by the `group` column and also stratified for classification. The splits depend only on the target, the groups and the seed, and the same seed gives the same folds on different NumPy versions.
+- UAR is the main classification metric, along with sensitivity, specificity, macro F1, ROC-AUC and the confusion matrix; accuracy alone gets inflated by the majority class.
+- When `dataset.csv` is read, any blank in the target column, or any non-numeric value in a regression task, is an error that lists the offending rows; those rows are not skipped.
+- Every setting is compared with the baseline by the corrected resampled t-test and the Wilcoxon test, with multiple-comparison correction.
+- Whether predictions agree with the clinical ratings is judged by CCC and Bland–Altman, not by correlation alone.
+
+### Regression analysis
+
+- A least-squares fit reports the standard errors, t, p and confidence intervals of the coefficients, adjusted $R^2$, AIC, BIC and the condition number, along with normality, heteroscedasticity, autocorrelation, leverage, Cook's distance and VIF. The t and F tests and the confidence intervals are valid only when the residuals are normal, have equal variance and are independent, so the diagnostics are written out together with the coefficient table.
+- When the residual degrees of freedom are 0 (fitting 7 parameters to 7 points, for example), the $R^2$ of 1 means nothing and neither do F and p, so they are output as NaN and marked not estimable; more parameters than observations, or collinear columns, raise an error.
+- Orthogonal polynomials and centered response surfaces are the default, so that high powers and interaction terms do not make the design matrix nearly singular.
+- The polynomial order sweep puts the in-sample metrics next to LOOCV and k-fold RMSE, AIC and BIC, and recommends an order by the configured criterion; it is the out-of-sample error that shows how much a fit overfits.
+- Stepwise selection records the action and statistics of every step and adds the VIF, so you can see how collinearity affects the selection (on the cement data, starting from the empty model and from the full model selects different variables).
+- Gradient descent standardizes the variables first and uses the vectorized simultaneous update. It judges convergence by the relative change in cost under an iteration cap, detects divergence, and matches the closed-form solution to $10^{-6}$.
+
+### Engineering
+
+I set each dependency's lower bound to a version that installs on Python 3.10. CI runs 3.10–3.13 on Linux and Windows, and a separate job runs the same tests with the oldest dependency versions.
+
+The default ablation is 18 settings with 15 folds each, so one run fits 270 models, and every result has to trace back to the settings that produced it. That is why all settings live in frozen dataclasses read from and written to YAML, a mistyped key is an error, and the data and output locations come only from configuration keys or command-line options. Every command except `index`, which only writes `dataset.csv`, leaves `config.yaml` and `manifest.json` in its output folder, and every figure has a CSV with the same data next to it, so checking a number or redrawing a figure in another tool never needs a rerun. On an input or configuration error the CLI prints one line and exits with code 2; progress and warnings go through logging to stderr.
+
+The code style conventions (type hints, numpy-style docstrings in English, ruff) are in CONTRIBUTING.md, which is written in Traditional Chinese. Tests use only synthetic data and the bundled public cement data. `tests/test_examples.py` actually runs the six examples with `--quick`, so an API change that breaks them fails in the tests first.
+
+Pre-emphasis, framing, the mel filterbank, Δ, CMN/CMVN, endpoint detection, HTK and WAV I/O, and UAR come from `speechdsp`; the combination of window, power spectrum, DCT scaling and energy term stays in this project, for the reason given in section 1 of [Method](#method).
+
+---
+
+## Development and testing
 
 ```bash
 pip install -e ".[dev]"
-python -m pytest -q                 # 全部測試，含 doctest
+python -m pytest -q                 # all tests, doctests included
 python -m ruff check .
 python -m ruff format --check .
-# Python 3.10 語法閘門（任何 Python 版本都能跑）
+# Python 3.10 syntax gate (runs on any Python version)
 python -c "import ast,pathlib; [ast.parse(p.read_text(encoding='utf-8'), str(p), feature_version=(3, 10)) for p in pathlib.Path('.').rglob('*.py') if not {'.venv', 'build', 'dist', '__pycache__'} & set(p.parts)]"
 ```
 
-`tests/test_python310_compat.py` 以 Python 3.10 的語法解析每個檔案，並掃描程式碼中 3.11 以後才有的標準函式庫名稱、NumPy 1.x 與 2.x 之間不相容的名稱，以及比宣告的相依版本下限更新的 API，同時確認 `import acoustic_feature_lab` 與命令列不會載入選用的 PyTorch。`tests/test_documentation.py` 會擋下簡體字和對岸用語，檢查 README 的標題順序，也確認沒有誤留本機路徑或電子郵件地址。沒有安裝 PyTorch 時，需要它的測試會自動略過；裝了 `dl` extra 的環境會一起跑，CI 的 `dl` job 用的是 CPU 版 PyTorch。
+`tests/test_python310_compat.py` parses every file with the Python 3.10 grammar and scans the code for standard-library names that arrived in 3.11 or later, names that are incompatible between NumPy 1.x and 2.x, and APIs newer than the declared lower bounds of the dependencies; it also checks that `import acoustic_feature_lab` and the command line do not load the optional PyTorch. `tests/test_documentation.py` rejects simplified characters and mainland Chinese wording, checks the heading order of the READMEs, and makes sure no local path or e-mail address was left behind. Tests that need PyTorch are skipped when it is not installed and run in an environment with the `dl` extra; the `dl` job in CI uses the CPU build of PyTorch.
 
 ---
 
@@ -787,4 +792,4 @@ python -c "import ast,pathlib; [ast.parse(p.read_text(encoding='utf-8'), str(p),
 
 ## License
 
-MIT License，Copyright (c) RL。詳見 [LICENSE](LICENSE)。
+MIT License, Copyright (c) RL. See [LICENSE](LICENSE).
