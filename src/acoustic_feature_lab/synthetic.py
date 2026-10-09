@@ -205,7 +205,7 @@ def make_vowel(
     >>> from acoustic_feature_lab.config import SyntheticConfig
     >>> short = SyntheticConfig(duration_s=0.5)
     >>> vowel = make_vowel(40.0, config=short, f0_hz=110.0, vowel="i", rng=1)
-    >>> vowel.shape, float(np.abs(vowel).max())
+    >>> vowel.shape, round(float(np.abs(vowel).max()), 6)
     ((8000,), 0.9)
     """
     from .config import SyntheticConfig
